@@ -209,10 +209,11 @@ Or just ask: *"Make a 32x32 slime with a 4-frame bounce, export it as a GIF and 
 
 ### Pixmith documents (`.pxmt`)
 
-`doc_open` and `doc_save` go through the core's own `pixmith_open` / `pixmith_save`, which pick the file format
-themselves, so the server follows whatever formats the linked `pixmith-core` supports. Pixmith's native `.pxmt`
-format (and project folders) is being added to the core; until the pinned revision includes it, a document saved as
-`.pxmt` is written in the `.aseprite` format and opens fine either way. A `project_*` tool group will follow.
+`doc_open` and `doc_save` go through the core's own `pixmith_open` / `pixmith_save`: a path ending in `.pxmt` is
+saved in Pixmith's native format (full sprite plus an embedded thumbnail, see the
+[format spec](https://github.com/azdharsyahputra/pixmith/blob/main/docs/PXMT_FORMAT.md)); any other path is saved as
+`.aseprite`. Opening detects the format from the file's content. Tools for Pixmith project folders (`project_*`) will
+follow.
 
 ## Security
 
