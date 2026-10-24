@@ -1,0 +1,45 @@
+[package]
+name = "pixmith-mcp"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+description = "Model Context Protocol server for the Pixmith pixel-art editor: lets AI agents create, edit, inspect and export sprites"
+license = "MIT"
+repository = "https://github.com/azdharsyahputra/pixmith-mcp"
+readme = "README.md"
+keywords = ["mcp", "pixel-art", "sprite", "aseprite", "ai"]
+categories = ["graphics", "game-development", "command-line-utilities"]
+
+[[bin]]
+name = "pixmith-mcp"
+path = "src/main.rs"
+
+[features]
+default = ["http"]
+# Streamable HTTP transport (`--http <addr>`). stdio is always available.
+http = ["dep:axum", "rmcp/transport-streamable-http-server"]
+
+[dependencies]
+pixmith-core = { git = "https://github.com/azdharsyahputra/pixmith", rev = "7179264262a8dec2d541dcde41f4bfb2541da3f3", package = "pixmith-core" }
+rmcp = { version = "3.7.0", default-features = false, features = ["server", "macros", "transport-io"] }
+tokio = { version = "1.54", features = ["rt-multi-thread", "macros", "io-std", "sync", "net", "signal"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+schemars = "1.2"
+base64 = "0.23"
+png = "0.17"
+axum = { version = "0.8", optional = true, default-features = false, features = ["http1", "tokio"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+# For local development against a checkout of the Pixmith repository next to this one, uncomment:
+# [patch."https://github.com/azdharsyahputra/pixmith"]
+# pixmith-core = { path = "../pixa/core" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+# The core turns panics into error results (its entry points catch them); that needs unwinding.
+panic = "unwind"
