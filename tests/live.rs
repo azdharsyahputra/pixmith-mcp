@@ -1,7 +1,7 @@
 //! Live mode: the binary driven over stdio against an in-process mock of the Pixmith app's live server.
 
 mod common;
-use common::mock_app::{MockApp, live_dir};
+use common::mock_app::{GAME_H, GAME_W, MockApp, live_dir};
 use common::{Client, decode_png};
 use serde_json::{Value, json};
 
@@ -561,7 +561,7 @@ fn resources_and_the_catalogue_know_about_the_app() {
     let r = c.request("tools/list", json!({}));
     let names: Vec<&str> =
         r["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
-    for n in ["app_status", "app_connect", "app_disconnect"] {
+    for n in ["app_status", "app_connect", "app_disconnect", "game_screenshot"] {
         assert!(names.contains(&n), "{n}");
     }
     let list = c.request("resources/list", json!({}));
@@ -585,6 +585,70 @@ fn render_shows_what_the_app_has() {
     let (w, h, rgba) = decode_png(&png);
     assert_eq!((w, h), (8, 8));
     assert_eq!(&rgba[..4], &RED);
+}
+
+#[test]
+fn game_screenshot_returns_the_game_as_image_content() {
+    let (mut c, mock) = start();
+    mock.with(|s| s.game = true);
+    let r = c.call("game_screenshot", json!({}));
+    assert_eq!(r["isError"], json!(false), "{r}");
+    let info: Value = serde_json::from_str(r["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!((info["w"].as_u64(), info["h"].as_u64()), (Some(GAME_W as u64), Some(GAME_H as u64)), "{info}");
+    assert_eq!(info["client"], "pixmith-godot");
+    let imgs = Client::images(&r);
+    assert_eq!(imgs.len(), 1);
+    let (w, h, rgba) = &imgs[0];
+    assert_eq!((*w, *h), (GAME_W, GAME_H));
+    assert_eq!(&rgba[..4], &RED);
+    assert_eq!(&rgba[(GAME_W as usize - 1) * 4..GAME_W as usize * 4], &[0, 0, 255, 255]);
+    assert_eq!(mock.count("game.capture"), 1);
+}
+
+#[test]
+fn game_screenshot_scales_with_nearest_neighbour_and_caps_the_long_side() {
+    let (mut c, mock) = start();
+    mock.with(|s| s.game = true);
+    let r = c.call("game_screenshot", json!({ "scale": 3, "timeout_ms": 500 }));
+    let info: Value = serde_json::from_str(r["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!((info["w"].as_u64(), info["h"].as_u64()), (Some(12), Some(6)), "{info}");
+    let (w, h, rgba) = &Client::images(&r)[0];
+    assert_eq!((*w, *h), (12, 6));
+    assert_eq!(&rgba[5 * 4..6 * 4], &RED, "pixel 5 is still the left half");
+    assert_eq!(&rgba[6 * 4..7 * 4], &[0, 0, 255, 255]);
+    assert!(c.err("game_screenshot", json!({ "scale": 9 })).contains("1-8"));
+    assert!(c.err("game_screenshot", json!({ "scale": 0 })).contains("1-8"));
+}
+
+#[test]
+fn game_screenshot_without_a_game_is_a_friendly_tool_error() {
+    let (mut c, mock) = start();
+    let e = c.err("game_screenshot", json!({}));
+    assert!(e.contains("no running game with the Pixmith Live Link addon"), "{e}");
+    assert!(e.contains("start the game from Godot (debug) with the addon enabled"), "{e}");
+    // The app stays connected and works.
+    assert_eq!(c.ok("app_status", json!({}))["connected"], true);
+    mock.with(|s| s.game = true);
+    assert_eq!(c.call("game_screenshot", json!({}))["isError"], json!(false));
+}
+
+#[test]
+fn game_screenshot_asks_for_a_newer_app_when_it_does_not_know_game_capture() {
+    let (mut c, mock) = start();
+    mock.with(|s| s.no_game_view = true);
+    let e = c.err("game_screenshot", json!({}));
+    assert!(e.contains("0.5.1"), "{e}");
+}
+
+#[test]
+fn game_screenshot_headless_is_a_tool_error() {
+    let mut c = Client::start(&[]);
+    let e = c.err("game_screenshot", json!({}));
+    assert!(e.contains("Pixmith Live Link addon"), "{e}");
+    assert!(e.contains("Pixmith app"), "{e}");
+    let mut off = Client::start(&["--live", "off"]);
+    let e = off.err("game_screenshot", json!({}));
+    assert!(e.contains("live mode is off"), "{e}");
 }
 
 fn base64_png(result: &Value) -> Vec<u8> {

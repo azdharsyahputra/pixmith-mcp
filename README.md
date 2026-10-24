@@ -142,14 +142,14 @@ HTTP-only clients run `pixmith-mcp --http 127.0.0.1:8765` and point them at `htt
 
 ## What an agent gets
 
-52 tools in 16 groups (`pixmith-mcp list-tools` prints them; `help` topic `tools` gives the agent the same list).
+53 tools in 16 groups (`pixmith-mcp list-tools` prints them; `help` topic `tools` gives the agent the same list).
 Tools with many related operations take an `action` argument, which keeps the tool count well below the limits some
 clients impose (Cursor, VS Code, Windsurf) while every schema stays flat and explicit.
 
 | Group | Tools | Covers |
 | --- | --- | --- |
 | Documents | `doc_new`, `doc_open`, `doc_save`, `doc_close`, `doc_list`, `doc_info`, `doc_set_active` | New sprites (size, background, color mode, palette preset); open `.pxmt` / `.aseprite` / `.ase`; import PNG, animated GIF, grid sprite sheets and sheets with Aseprite JSON; save / save as / save a copy; full inspection (layer tree, frames and durations, cel occupancy, tags, palette, slices, tilesets, user data, selection, history) |
-| App (live mode) | `app_status`, `app_connect`, `app_disconnect` | Is the Pixmith app connected, which documents it has open; switch between the app and headless editing at runtime |
+| App (live mode) | `app_status`, `app_connect`, `app_disconnect`, `game_screenshot` | Is the Pixmith app connected, which documents it has open; switch between the app and headless editing at runtime; screenshot of the running Godot game (Live Link game view, needs Pixmith 0.5.1+) |
 | Viewing | `render`, `get_pixels`, `get_pixel` | PNG image results (auto scale, frames, single layer or group, region, background, onion skin); exact colors as a compact character grid with legend or as hex |
 | Drawing | `draw_pixels`, `draw_shape`, `draw_polygon`, `draw_curve`, `draw_stroke`, `fill`, `spray`, `gradient`, `draw_text`, `brush` | Batch pixels, line / rectangle / ellipse (filled or outline), polygons, Bezier curves, freehand strokes with pixel-perfect mode, flood fill (contiguous or global, tolerance, dither patterns), spray, linear / radial gradients with Bayer dither, the built-in pixel font; brush size and shape, ink modes (simple, alpha, lock alpha, behind, shading with a ramp), mirror symmetry, custom brushes |
 | Selection | `select`, `clipboard` | Rectangle, polygon / lasso, magic wand, select by color, all / none / invert, expand / contract / border, replace / add / subtract; delete, move and crop; copy / cut / paste (also a PNG file) as a floating selection, move, commit or cancel |
@@ -160,7 +160,7 @@ clients impose (Cursor, VS Code, Windsurf) while every schema stays flat and exp
 | Tilemaps | `tileset`, `tilemap`, `terrain`, `terrain_paint` | Tilesets (view as image, read and write tile pixels, add / duplicate / delete / rename); tilemap layers (create, convert from image, stamp with flips, read the grid); terrain auto-tiling: sides / blob / corners (dual grid) modes, several terrains with priorities, templates, masks, peers, symmetry, weights, terrain brush / rectangle / flood / overrides, rebuild, missing-tile report |
 | Slices & user data | `slice`, `user_data` | Slices with 9-patch centers and pivots, keyed per frame; text and color user data of the sprite, layers, cels, tags and slices |
 | Tweening | `tween` | Keys for x, y, rotation, scale, opacity; eases including Bezier; pivots; RotSprite and snapping options; copy / paste keys; bake into cels |
-| Export | `export`, `export_godot`, `export_godot_tileset` | PNG (frame, scale), GIF, APNG, PNG sequences, sprite sheets (horizontal / vertical / grid, padding, border, extrude, trim, Aseprite JSON) per tag or per layer; Godot 4 SpriteFrames `.tres` + atlas (+ `.tscn`), Godot 4 TileSet `.tres` with terrains and collisions; dry runs and previews |
+| Export | `export`, `export_godot`, `export_godot_tileset` | PNG (frame, scale), GIF, APNG, PNG sequences, sprite sheets (horizontal / vertical / grid, padding, border, extrude, trim, Aseprite JSON) per tag or per layer; Godot 4 SpriteFrames `.tres` + atlas (+ `.tscn`, and Live Link: the running game updates after every edit), Godot 4 TileSet `.tres` with terrains and collisions; dry runs and previews |
 | History | `undo`, `redo`, `history`, `history_goto`, `transaction` | Every mutating call is one labeled undo step; jump anywhere in the history; group many calls into one step |
 | Scripting | `run_lua` | The Lua 5.4 scripting API of Pixmith (sandboxed, one undo step, errors roll back) for anything else |
 | Help | `help` | The usage guide, the Lua API reference, example scripts, palette presets, the tool list |
@@ -230,6 +230,27 @@ times); while a dialog is open the app asks it to wait and it retries for a few 
   calls and dropped as soon as the document changes in the app. Each call is a round trip and an undo step, so prefer
   batch tools (`draw_pixels`, `draw_polygon`, `run_lua`) over thousands of tiny calls.
 
+### Godot Live Link and the game view
+
+Needs Pixmith 0.5.1 or later. With the app connected, a Godot game can show the sprite you are drawing, live:
+
+1. Export once with `export_godot` and `save_settings: true` (or **Export > Godot SpriteFrames** in the app). The
+   document then knows its `res://` resource, so the app can tell the game which SpriteFrames it feeds.
+2. Run a game that has the Live Link addon (`godot/addons/pixmith_live_link` in the Pixmith repository, copied into the
+   project's `addons` folder and enabled) from Godot as a debug build. After every edit, including each tool call of
+   the agent, the game swaps in the new atlas and regions in place: no re-export, no restart. Released builds never do
+   this.
+3. `game_screenshot` returns a screenshot of the running game as an image, so the agent can edit a sprite and then look
+   at it in the game. Arguments: `timeout_ms` (default 3000, at most 10000) and `scale` (integer 1-8, nearest neighbour,
+   long side capped at 2048 px) to enlarge small pixel games. It needs live mode; without the app, or without a
+   running game that has the addon, it fails with a tool error that says so.
+
+```jsonc
+export_godot     {"project_root": "~/games/demo", "tres_path": "art/slime.tres", "save_settings": true}   // once
+draw_pixels      {"points": [[13, 17], [18, 17]], "color": "#ff004d"}    // the running game shows it right away
+game_screenshot  {"scale": 2}                                           // -> image of the game
+```
+
 ### Troubleshooting live mode
 
 - `app_status` says `connected: false` and gives the reason. Is the app running? In the app, **Preferences > Allow AI
@@ -240,6 +261,8 @@ times); while a dialog is open the app asks it to wait and it retries for a few 
 - "refused the connection" / "protocol": the app and `pixmith-mcp` are from incompatible versions; update the older one.
 - Running the server in a different account, container or sandbox than the app: the discovery folder and the loopback
   port must be reachable; set `PIXMITH_SUPPORT_DIR` to the app's folder if it is relocated.
+- `game_screenshot` says no game answered: start the game from Godot as a debug build with the addon enabled, and make
+  sure the Pixmith app is 0.5.1 or later; a game that is not running or paused in the debugger sends no frame.
 - You do not want the agent to touch the app: start the server with `--live off` (`print-config <client> --live off`
   writes it into the client configuration).
 - "busy" errors mean a dialog is open in the app or you are in the middle of a stroke; the server already waited a few

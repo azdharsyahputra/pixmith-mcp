@@ -12,7 +12,7 @@ mod client;
 mod discovery;
 
 pub use client::AppDoc;
-use client::{BUSY, Conn, NO_METHOD, RpcError, STALE, UNKNOWN_DOC, UNSAVED};
+use client::{BUSY, Conn, NO_GAME, NO_METHOD, RpcError, STALE, UNKNOWN_DOC, UNSAVED};
 
 use crate::doc::Doc;
 use crate::engine::{DocEntry, Engine, R};
@@ -211,6 +211,29 @@ impl Live {
                 r => return r,
             }
         }
+    }
+
+    /// A screenshot of the running Godot game (`game.capture`): the PNG bytes, its size and the game's client name.
+    pub fn game_capture(&mut self, timeout_ms: u64) -> R<(Vec<u8>, u32, u32, String)> {
+        if !self.ensure() {
+            return Err(format!(
+                "game_screenshot needs the running Pixmith app (live mode) and a game with the Pixmith Live Link addon: {}",
+                self.not_connected()
+            ));
+        }
+        let v = self.rpc_read("game.capture", json!({ "timeout_ms": timeout_ms })).map_err(|e| match e {
+            RpcError::Rpc { code: NO_GAME, .. } => "no running game with the Pixmith Live Link addon answered; start the game from Godot (debug) with the addon enabled".to_string(),
+            RpcError::Rpc { code: NO_METHOD, .. } => "this Pixmith app does not support the game view; update Pixmith to 0.5.1 or later".to_string(),
+            other => explain(&other, "the app"),
+        })?;
+        let png = v
+            .get("png")
+            .and_then(Value::as_str)
+            .and_then(|b| base64::engine::general_purpose::STANDARD.decode(b).ok())
+            .ok_or("the Pixmith app answered game.capture without a valid PNG")?;
+        let n = |k: &str| v.get(k).and_then(Value::as_u64).unwrap_or(0) as u32;
+        let client = v.get("client").and_then(Value::as_str).unwrap_or("").to_string();
+        Ok((png, n("w"), n("h"), client))
     }
 
     /// The app's open documents and the active one.

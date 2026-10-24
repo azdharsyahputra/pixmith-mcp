@@ -13,6 +13,8 @@ pub const STALE: i64 = -32009;
 pub const BUSY: i64 = -32010;
 pub const UNSAVED: i64 = -32011;
 pub const UNKNOWN_DOC: i64 = -32004;
+/// `game.capture` found no running game, or no frame arrived in time.
+pub const NO_GAME: i64 = -32012;
 pub const NO_METHOD: i64 = -32601;
 
 #[derive(Debug)]

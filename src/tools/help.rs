@@ -63,6 +63,9 @@ engine in-process; every tool call edits real documents with the same code the d
   tiles -> terrain assign_masks -> terrain_paint paint/rect/flood -> terrain missing to check coverage.
 - Godot: export_godot (project_root with project.godot, tres_path inside it; one animation per tag) and
   export_godot_tileset for tilesets with terrains. preview=true shows what would be written.
+- Godot Live Link (Pixmith app 0.5.1 or later): export_godot once with save_settings=true; then a running game with the
+  Pixmith Live Link addon (debug builds) updates its sprites after every edit you make, no re-export. game_screenshot
+  returns a screenshot of that running game (scale 1-8 enlarges small pixel games) so you can check the result.
 - Anything else: run_lua (see help topic lua_api).
 "##;
 

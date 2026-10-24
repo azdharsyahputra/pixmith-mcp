@@ -3,8 +3,10 @@
 use super::docs::NoArgs;
 use super::{Hints, Out, READ, ToolDef, tool};
 use crate::engine::{Engine, R};
+use crate::image::decode_png;
 use schemars::JsonSchema;
 use serde::Deserialize;
+use serde_json::json;
 
 /// Changes only which documents later tool calls address.
 const SWITCH: Hints = Hints { read_only: false, destructive: false, idempotent: true, files: false };
@@ -38,7 +40,24 @@ pub fn tools() -> Vec<ToolDef> {
             app_disconnect,
             "Disconnect from the Pixmith app and work headless until app_connect is called. The app's documents stay open in the app; headless documents (ids d1, d2, ...) are unaffected."
         ),
+        tool!(
+            "App",
+            "game_screenshot",
+            "Screenshot of the running Godot game",
+            READ,
+            ScreenshotArgs,
+            game_screenshot,
+            "Take a screenshot of the running Godot game and return it as an image (plus its size and the game's client name as JSON). Needs live mode (Pixmith 0.5.1 or later running) and a game started from Godot in debug with the Pixmith Live Link addon enabled (see export_godot). After editing a sprite, call this to see the result in the game itself: Live Link has already put the new art into the running game. Pixel-art games are small, so `scale` (integer 1-8, nearest neighbour, long side capped at 2048 px) enlarges the picture. Errors when no such game is running or it does not answer within `timeout_ms`."
+        ),
     ]
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct ScreenshotArgs {
+    /// How long to wait for the game's frame, in milliseconds (default 3000, at most 10000).
+    pub timeout_ms: Option<u64>,
+    /// Integer upscale 1-8 for small pixel games (default 1); nearest neighbour, the long side stays within 2048 px.
+    pub scale: Option<u32>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -73,4 +92,25 @@ fn app_disconnect(e: &mut Engine, _: NoArgs) -> R<Out> {
     e.live.set_disabled();
     let ids = headless_ids(e);
     Out::json(e.live.status(ids))
+}
+
+/// Longest side of an enlarged screenshot.
+const MAX_SIDE: usize = 2048;
+
+fn game_screenshot(e: &mut Engine, a: ScreenshotArgs) -> R<Out> {
+    let scale = a.scale.unwrap_or(1);
+    if !(1..=8).contains(&scale) {
+        return Err(format!("scale must be 1-8, got {scale}"));
+    }
+    let timeout = a.timeout_ms.unwrap_or(3000).clamp(1, 10_000);
+    let (png, w, h, client) = e.live.game_capture(timeout)?;
+    let mut value = json!({ "w": w, "h": h, "client": client });
+    if scale == 1 {
+        return Ok(Out { value, images: vec![png], ..Default::default() });
+    }
+    let img = decode_png(&png).map_err(|err| format!("the game sent a PNG that cannot be read: {err}"))?;
+    let scale = (scale as usize).min(MAX_SIDE / img.w.max(img.h).max(1)).max(1);
+    let img = img.upscale(scale);
+    value = json!({ "w": img.w, "h": img.h, "client": client, "scale": scale });
+    Ok(Out { value, images: vec![img.png()?], ..Default::default() })
 }

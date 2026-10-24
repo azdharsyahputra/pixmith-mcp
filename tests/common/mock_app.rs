@@ -54,6 +54,32 @@ pub struct State {
     pub undo_supported: bool,
     pub clients: u32,
     pub hellos: u32,
+    /// A running game with the Live Link addon: `game.capture` returns `GAME_W` x `GAME_H` (left half red,
+    /// right half blue). Without one it fails with -32012.
+    pub game: bool,
+    /// `game.capture` is unknown to this "older" app (-32601).
+    pub no_game_view: bool,
+}
+
+pub const GAME_W: u32 = 4;
+pub const GAME_H: u32 = 2;
+
+/// The frame the mock game sends: a tiny PNG, red on the left, blue on the right.
+pub fn game_png() -> Vec<u8> {
+    let mut px = Vec::new();
+    for _ in 0..GAME_H {
+        for x in 0..GAME_W {
+            px.extend_from_slice(if x < GAME_W / 2 { &[255, 0, 0, 255] } else { &[0, 0, 255, 255] });
+        }
+    }
+    let mut out = Vec::new();
+    {
+        let mut enc = png::Encoder::new(&mut out, GAME_W, GAME_H);
+        enc.set_color(png::ColorType::Rgba);
+        enc.set_depth(png::BitDepth::Eight);
+        enc.write_header().unwrap().write_image_data(&px).unwrap();
+    }
+    out
 }
 
 impl State {
@@ -236,6 +262,13 @@ fn handle(state: &mut State, method: &str, p: &Value) -> Result<Value, (i64, Str
             }
             let d = &state.docs[i];
             Ok(json!({ "document": d.id, "layer": d.layer, "frame": d.frame, "zoom": 8, "tool": "pencil" }))
+        }
+        "game.capture" if !state.no_game_view => {
+            if !state.game {
+                return Err((-32012, "no running game".into()));
+            }
+            Ok(json!({ "png": base64::engine::general_purpose::STANDARD.encode(game_png()),
+                       "w": GAME_W, "h": GAME_H, "client": "pixmith-godot" }))
         }
         _ => Err((-32601, format!("method not found: {method}"))),
     }
