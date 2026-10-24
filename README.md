@@ -192,7 +192,7 @@ The server also provides:
 
 ## Live mode: edit the open Pixmith app
 
-Start the Pixmith app (macOS app, or the Windows / Linux / macOS desktop app) and use the tools as usual: the agent's
+Start Pixmith 0.5.0 or later (macOS app, or the Windows / Linux / macOS desktop app) and use the tools as usual: the agent's
 edits show up in the open window while it works, each call is one undo step named **AI: \<tool\>** (for example
 `AI: draw_shape rectangle`) that you can take back with Cmd/Ctrl+Z, and the document is marked as edited. Close the
 app and the very same tools keep working headless on files, as before. No configuration is needed.
