@@ -1,6 +1,7 @@
 //! The MCP server: tool listing and dispatch, prompts and resources. Tool calls run on the engine thread.
 
 use crate::engine::EngineHandle;
+use crate::live;
 use crate::tools::{self, ToolDef, check_unknown, help};
 use base64::Engine as _;
 use rmcp::model::*;
@@ -12,6 +13,7 @@ use std::sync::Arc;
 struct Entry {
     def: ToolDef,
     schema: Map<String, Value>,
+    takes_doc: bool,
 }
 
 #[derive(Clone)]
@@ -22,7 +24,15 @@ pub struct PixmithServer {
 
 impl PixmithServer {
     pub fn new(engine: Arc<EngineHandle>) -> PixmithServer {
-        let tools = tools::all().into_iter().map(|def| Entry { schema: (def.schema)(), def }).collect();
+        let tools = tools::all()
+            .into_iter()
+            .map(|def| {
+                let schema = (def.schema)();
+                let takes_doc =
+                    schema.get("properties").and_then(Value::as_object).is_some_and(|p| p.contains_key("doc"));
+                Entry { schema, def, takes_doc }
+            })
+            .collect();
         PixmithServer { engine, tools: Arc::new(tools) }
     }
 
@@ -55,12 +65,12 @@ impl PixmithServer {
         if let Err(e) = check_unknown(&self.tools[i].schema, &args) {
             return CallToolResult::error(vec![ContentBlock::text(e)]);
         }
-        let run = self.tools[i].def.run;
+        let tool = live::Call { def: self.tools[i].def, takes_doc: self.tools[i].takes_doc };
         let result = self
             .engine
             .run(move |e| {
                 let before = pixmith_core::ffi::pixmith_panic_count();
-                let out = run(e, args);
+                let out = live::dispatch(e, &tool, args);
                 let panicked = pixmith_core::ffi::pixmith_panic_count() != before;
                 (out, panicked)
             })
@@ -307,7 +317,11 @@ impl ServerHandler for PixmithServer {
             .collect();
         let docs = self
             .engine
-            .run(|e| e.docs.iter().map(|d| (d.id.clone(), d.name.clone())).collect::<Vec<_>>())
+            .run(|e| {
+                let mut v: Vec<(String, String)> = e.live.app_documents();
+                v.extend(e.docs.iter().filter(|d| !d.id.starts_with("app:")).map(|d| (d.id.clone(), d.name.clone())));
+                v
+            })
             .await
             .unwrap_or_default();
         for (id, name) in docs {

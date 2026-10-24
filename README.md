@@ -11,6 +11,10 @@ runs in-process, through the same `pixmith_*` entry points the macOS and desktop
 like in the app: every edit is an undo step, linked cels stay in sync, panics inside the core are caught and the
 document is rewound instead of crashing the server.
 
+When the Pixmith app is open on the same computer, the tools edit **its** documents instead: every edit appears in the
+window as it happens and is a normal undo step there (see [Live mode](#live-mode-edit-the-open-pixmith-app)). With
+no app running, everything works headless, exactly as described below.
+
 Works with every MCP client that speaks stdio (Claude Code, Claude Desktop, Codex CLI, Google Antigravity, Cursor,
 Gemini CLI, VS Code / GitHub Copilot, Windsurf, Cline, Zed, ...). Streamable HTTP is available with `--http`.
 
@@ -29,6 +33,7 @@ Then print the configuration for your client, with the binary's absolute path al
 ```sh
 pixmith-mcp print-config claude-code       # also: claude-desktop codex antigravity cursor gemini vscode windsurf json
 pixmith-mcp print-config cursor --root ~/art
+pixmith-mcp print-config cursor --live off      # never use the Pixmith app (default: auto)
 ```
 
 `print-config` only prints; it never edits a client's configuration.
@@ -36,7 +41,8 @@ pixmith-mcp print-config cursor --root ~/art
 ## Client setup
 
 Replace `/path/to/pixmith-mcp` with the real path (`which pixmith-mcp`, or use `print-config`). The optional
-`--root <dir>` limits file access to one folder (recommended, see [Security](#security)).
+`--root <dir>` limits file access to one folder (recommended, see [Security](#security)); `--live auto|on|off` controls
+[live mode](#live-mode-edit-the-open-pixmith-app).
 
 ### Claude Code
 
@@ -136,13 +142,14 @@ HTTP-only clients run `pixmith-mcp --http 127.0.0.1:8765` and point them at `htt
 
 ## What an agent gets
 
-49 tools in 15 groups (`pixmith-mcp list-tools` prints them; `help` topic `tools` gives the agent the same list).
+52 tools in 16 groups (`pixmith-mcp list-tools` prints them; `help` topic `tools` gives the agent the same list).
 Tools with many related operations take an `action` argument, which keeps the tool count well below the limits some
 clients impose (Cursor, VS Code, Windsurf) while every schema stays flat and explicit.
 
 | Group | Tools | Covers |
 | --- | --- | --- |
 | Documents | `doc_new`, `doc_open`, `doc_save`, `doc_close`, `doc_list`, `doc_info`, `doc_set_active` | New sprites (size, background, color mode, palette preset); open `.pxmt` / `.aseprite` / `.ase`; import PNG, animated GIF, grid sprite sheets and sheets with Aseprite JSON; save / save as / save a copy; full inspection (layer tree, frames and durations, cel occupancy, tags, palette, slices, tilesets, user data, selection, history) |
+| App (live mode) | `app_status`, `app_connect`, `app_disconnect` | Is the Pixmith app connected, which documents it has open; switch between the app and headless editing at runtime |
 | Viewing | `render`, `get_pixels`, `get_pixel` | PNG image results (auto scale, frames, single layer or group, region, background, onion skin); exact colors as a compact character grid with legend or as hex |
 | Drawing | `draw_pixels`, `draw_shape`, `draw_polygon`, `draw_curve`, `draw_stroke`, `fill`, `spray`, `gradient`, `draw_text`, `brush` | Batch pixels, line / rectangle / ellipse (filled or outline), polygons, Bezier curves, freehand strokes with pixel-perfect mode, flood fill (contiguous or global, tolerance, dither patterns), spray, linear / radial gradients with Bayer dither, the built-in pixel font; brush size and shape, ink modes (simple, alpha, lock alpha, behind, shading with a ramp), mirror symmetry, custom brushes |
 | Selection | `select`, `clipboard` | Rectangle, polygon / lasso, magic wand, select by color, all / none / invert, expand / contract / border, replace / add / subtract; delete, move and crop; copy / cut / paste (also a PNG file) as a floating selection, move, commit or cancel |
@@ -169,8 +176,8 @@ The server also provides:
 
 ### Conventions
 
-- Documents are addressed by the id `doc_new` / `doc_open` return (`"d1"`); `doc` can be left out when only one
-  document is open.
+- Documents are addressed by the id `doc_new` / `doc_open` return (`"d1"`, or `"app:doc-3"` for a document open in the
+  Pixmith app); `doc` can be left out when only one document is open (with the app connected: the app's active one).
 - Pixel coordinates are 0-based from the top-left. Layers are 0-based with layer 0 at the bottom; layers, tags,
   slices and tilesets can also be given by name. Frames are 0-based. (Lua scripts use 1-based layers and frames, as
   documented in the Lua API.)
@@ -182,6 +189,61 @@ The server also provides:
   Unknown argument names are reported (with the valid ones), which catches typos early.
 - Large results are bounded: `get_pixels` returns at most 16384 pixels per call (4096 as hex), `render` at most 16
   images of at most 4096 px, `history` is paginated, `doc_info` truncates very long frame lists.
+
+## Live mode: edit the open Pixmith app
+
+Start the Pixmith app (macOS app, or the Windows / Linux / macOS desktop app) and use the tools as usual: the agent's
+edits show up in the open window while it works, each call is one undo step named **AI: \<tool\>** (for example
+`AI: draw_shape rectangle`) that you can take back with Cmd/Ctrl+Z, and the document is marked as edited. Close the
+app and the very same tools keep working headless on files, as before. No configuration is needed.
+
+```
+agent --MCP--> pixmith-mcp --127.0.0.1, token--> Pixmith app (your open documents)
+```
+
+How it works, in short: the app writes a small discovery file (`<app data>/Live/<pid>.json`) while it runs and listens
+on a loopback port. For each editing call the server fetches the document as `.pxmt` bytes, runs the unchanged tool
+code on its copy with the same `pixmith-core` the app uses, and sends the result back as one undo step. The protocol is
+specified in the Pixmith repository (`docs/LIVE_PROTOCOL.md`). A revision number per document stops the server from
+overwriting something you changed in the meantime: it fetches again and redoes the edit on your version (up to 3
+times); while a dialog is open the app asks it to wait and it retries for a few seconds.
+
+- **Which document?** Documents open in the app have the ids `app:<id>` (`app_status` or `doc_list` shows them).
+  Leave `doc` out and the tools use the app's **active** document, so you choose the target by switching tabs.
+  `doc_new` and `doc_open` create the sprite in a new tab of the app; pass `"target": "headless"` to keep a document
+  inside the server only (its id is `d1`, ...). `doc_save`, `doc_close` and `doc_set_active` act on the app's tab
+  (`doc_save` saves with the app, so its dirty marker is cleared; `copy: true` writes a copy without touching the tab).
+- **Layer and frame.** Tools without `layer` / `frame` use the app's current layer and frame. A tool aimed at another
+  layer or frame, or one that adds a layer, moves the app's current layer / frame there, so you see where it works.
+- **Modes.** `--live auto` (default) uses the app when one is running and falls back to headless otherwise;
+  `--live on` requires the app (tools fail with a clear message when none is running; `target: "headless"` still
+  works); `--live off` never talks to an app. The `PIXMITH_LIVE` environment variable (`auto|on|off`) is the same
+  switch; the flag wins. At runtime, `app_status` shows the state, `app_disconnect` makes the server work headless
+  until `app_connect` (which also picks an instance with `pid` when several apps run, newest by default).
+- **Several clients, several apps.** The newest running instance wins. Discovery files of dead processes are ignored
+  (and deleted); a file whose port refuses the connection is ignored. `PIXMITH_SUPPORT_DIR` replaces the platform's
+  app data folder here exactly as it does in the apps (the folder is `Pixmith` inside it, `pixmith` on Linux).
+- **Limits.** `history` and `history_goto` are not available on app documents and `transaction` does nothing there: the
+  app owns the undo history and every call is its own step. `undo` / `redo` are handed to the app when it supports
+  `documents.undo` / `documents.redo`; otherwise the tool says to press Cmd/Ctrl+Z in the app. The app's own
+  selection is not visible to the tools; a selection made with the `select` tool is kept by the server for the next
+  calls and dropped as soon as the document changes in the app. Each call is a round trip and an undo step, so prefer
+  batch tools (`draw_pixels`, `draw_polygon`, `run_lua`) over thousands of tiny calls.
+
+### Troubleshooting live mode
+
+- `app_status` says `connected: false` and gives the reason. Is the app running? In the app, **Preferences > Allow AI
+  agents to control Pixmith (Live mode)** must be on (it is by default); turning it off closes the port and removes the
+  discovery file. While an agent is connected, the app shows an "AI connected" chip in the title row; its menu lists
+  the client and has **Disconnect**.
+- The app was started after the agent: nothing to do in `auto` mode, the next call finds it; or call `app_connect`.
+- "refused the connection" / "protocol": the app and `pixmith-mcp` are from incompatible versions; update the older one.
+- Running the server in a different account, container or sandbox than the app: the discovery folder and the loopback
+  port must be reachable; set `PIXMITH_SUPPORT_DIR` to the app's folder if it is relocated.
+- You do not want the agent to touch the app: start the server with `--live off` (`print-config <client> --live off`
+  writes it into the client configuration).
+- "busy" errors mean a dialog is open in the app or you are in the middle of a stroke; the server already waited a few
+  seconds. Close the dialog and ask again.
 
 ## Examples
 
@@ -228,7 +290,10 @@ follow.
   limits.
 - `--http` binds where you tell it (use `127.0.0.1`), accepts only local `Host` headers and local browser origins,
   and has no authentication. Prefer stdio.
-- The server never touches Pixmith's own settings, autosave or script folders.
+- The server never touches Pixmith's own settings, autosave or script folders. In live mode it only reads the
+  discovery files in the app's `Live` folder and talks to the app on `127.0.0.1` with the per-launch token from that
+  file (readable by your user only); `--live off` disables all of it. File paths given to `doc_open` / `doc_save` for
+  app documents go through `--root` like every other path.
 
 ## Development
 

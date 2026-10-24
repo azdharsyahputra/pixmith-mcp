@@ -5,6 +5,7 @@ use crate::engine::{Engine, R};
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value, json};
 
+pub mod app;
 pub mod color;
 pub mod docs;
 pub mod draw;
@@ -62,6 +63,7 @@ pub const OPEN_FILES: Hints = Hints { read_only: false, destructive: false, idem
 
 pub type Handler = fn(&mut Engine, Value) -> R<Out>;
 
+#[derive(Clone, Copy)]
 pub struct ToolDef {
     pub name: &'static str,
     pub title: &'static str,
@@ -95,6 +97,7 @@ pub(crate) use tool;
 pub fn all() -> Vec<ToolDef> {
     [
         docs::tools(),
+        app::tools(),
         view::tools(),
         draw::tools(),
         select::tools(),

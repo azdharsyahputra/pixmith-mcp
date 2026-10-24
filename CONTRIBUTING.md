@@ -26,6 +26,10 @@ end of `Cargo.toml` (it expects the repository next to this one, at `../pixa`).
   `Ref` (index or name) resolution, and `DocEntry::edit`, which turns every mutating call into one labeled undo step.
 - `src/tools/*.rs`: one module per tool group. Argument structs double as the JSON Schemas (`schemars`); keep field
   doc comments precise, they are what the model reads.
+- `src/live/`: live mode. `discovery.rs` (the app's `Live/*.json` files), `client.rs` (the JSON-RPC connection),
+  `mod.rs` (shadow documents, routing between app and headless, apply with stale/busy retries). Tools stay unaware of
+  it: they run on a decoded copy of the app's document and the result is applied back. `tests/common/mock_app.rs` is a
+  mock of the app's server (real `pixmith-core` editors) that `tests/live.rs` drives the binary against.
 - `src/paths.rs`: the `--root` sandbox. Every path a tool reads or writes must go through `Sandbox::read`,
   `Sandbox::dir` or `Sandbox::write`.
 

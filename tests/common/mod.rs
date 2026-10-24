@@ -7,6 +7,8 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
+pub mod mock_app;
+
 pub struct Client {
     child: Child,
     stdin: ChildStdin,
@@ -23,12 +25,30 @@ impl Client {
     }
 
     pub fn start_in(dir: tempfile::TempDir, extra: &[&str]) -> Client {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_pixmith-mcp"))
-            .args(extra)
+        Client::start_env(dir, extra, &[])
+    }
+
+    /// The folder the server looks for a running app in (`PIXMITH_SUPPORT_DIR`), inside the test directory.
+    pub fn support(dir: &Path) -> PathBuf {
+        dir.join("support")
+    }
+
+    /// Like [`start_in`](Self::start_in) with extra environment variables (they win over the defaults).
+    pub fn start_env(dir: tempfile::TempDir, extra: &[&str], env: &[(&str, &str)]) -> Client {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_pixmith-mcp"));
+        cmd.args(extra)
             .current_dir(dir.path())
             .env("HOME", dir.path())
             .env("USERPROFILE", dir.path())
             .env("APPDATA", dir.path())
+            // Never find (or disturb) a Pixmith app that happens to be running on the developer's machine.
+            .env("PIXMITH_SUPPORT_DIR", Client::support(dir.path()))
+            .env_remove("PIXMITH_LIVE")
+            .env_remove("XDG_DATA_HOME");
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+        let mut child = cmd
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())

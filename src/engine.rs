@@ -3,12 +3,14 @@
 //! document lives on one dedicated thread and every tool call runs there, one after another.
 
 use crate::doc::{Doc, take_string};
+use crate::live::{Live, Mode};
 use crate::paths::Sandbox;
 use pixmith_core::document::{layers as layers_ffi, slices as slices_ffi, tilemap as tm};
 use pixmith_core::ffi::document as core;
 use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::Deserialize;
 use std::borrow::Cow;
+use std::cell::Cell;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 use std::sync::mpsc;
@@ -42,6 +44,9 @@ pub struct DocEntry {
     pub layer: u32,
     pub frame: u32,
     pub txns: Vec<Txn>,
+    /// The layer and frame the running tool asked for by name or index (live mode moves the app's current layer
+    /// and frame there). Reset by whoever starts a tool call.
+    pub asked: Cell<(Option<u32>, Option<u32>)>,
 }
 
 /// How an edit gets its undo step.
@@ -123,7 +128,11 @@ impl DocEntry {
         let n = self.layer_count();
         let i = match r {
             None => self.layer.min(n.saturating_sub(1)),
-            Some(r) => r.resolve("layer", n, |i| self.layer_name(i))?,
+            Some(r) => {
+                let i = r.resolve("layer", n, |i| self.layer_name(i))?;
+                self.asked.set((Some(i), self.asked.get().1));
+                i
+            }
         };
         if i >= n {
             return Err(format!("layer {i} does not exist (the document has {n} layers, 0 = bottom)"));
@@ -157,9 +166,13 @@ impl DocEntry {
     /// A frame index (default: the active frame).
     pub fn frame(&self, f: Option<u32>) -> R<u32> {
         let n = self.doc.frame_count();
+        let explicit = f.is_some();
         let f = f.unwrap_or(self.frame.min(n.saturating_sub(1)));
         if f >= n {
             return Err(format!("frame {f} does not exist (the document has {n} frames, 0-based)"));
+        }
+        if explicit {
+            self.asked.set((self.asked.get().0, Some(f)));
         }
         Ok(f)
     }
@@ -256,18 +269,40 @@ pub struct Engine {
     next_id: u32,
     pub sandbox: Sandbox,
     pub clip: Option<Clip>,
+    /// The connection to a running Pixmith app (live mode).
+    pub live: Live,
 }
 
 impl Engine {
-    pub fn new(sandbox: Sandbox) -> Engine {
-        Engine { docs: Vec::new(), next_id: 1, sandbox, clip: None }
+    pub fn new(sandbox: Sandbox, live: Mode) -> Engine {
+        Engine { docs: Vec::new(), next_id: 1, sandbox, clip: None, live: Live::new(live) }
+    }
+
+    /// Removes and returns the newest document, giving its id back for the next one. Live mode builds some
+    /// documents here and moves them into the app.
+    pub fn take_last(&mut self) -> Option<DocEntry> {
+        let d = self.docs.pop()?;
+        if d.id == format!("d{}", self.next_id - 1) {
+            self.next_id -= 1;
+        }
+        Some(d)
     }
 
     /// Registers a document and returns its id.
     pub fn add(&mut self, doc: Doc, name: String, path: Option<PathBuf>, source: Option<PathBuf>) -> String {
         let id = format!("d{}", self.next_id);
         self.next_id += 1;
-        self.docs.push(DocEntry { id: id.clone(), name, doc, path, source, layer: 0, frame: 0, txns: Vec::new() });
+        self.docs.push(DocEntry {
+            id: id.clone(),
+            name,
+            doc,
+            path,
+            source,
+            layer: 0,
+            frame: 0,
+            txns: Vec::new(),
+            asked: Cell::new((None, None)),
+        });
         id
     }
 
@@ -306,13 +341,13 @@ pub struct EngineHandle {
 }
 
 impl EngineHandle {
-    pub fn spawn(sandbox: Sandbox) -> EngineHandle {
+    pub fn spawn(sandbox: Sandbox, live: Mode) -> EngineHandle {
         let (tx, rx) = mpsc::channel::<Job>();
         std::thread::Builder::new()
             .name("pixmith-engine".into())
             .stack_size(16 << 20)
             .spawn(move || {
-                let mut engine = Engine::new(sandbox);
+                let mut engine = Engine::new(sandbox, live);
                 while let Ok(job) = rx.recv() {
                     // A bug in a tool must not take the documents down with it; the core guards its own calls.
                     let _ = catch_unwind(AssertUnwindSafe(|| job(&mut engine)));

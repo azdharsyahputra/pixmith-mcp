@@ -14,7 +14,8 @@ Pixmith is a pixel-art editor (sprites, animation, tilemaps; .pxmt and .aseprite
 engine in-process; every tool call edits real documents with the same code the desktop apps use.
 
 ## Conventions
-- Documents have ids ("d1", "d2", ...) from doc_new / doc_open. `doc` may be omitted when only one is open.
+- Documents have ids ("d1", "d2", ...) from doc_new / doc_open (in the Pixmith app: "app:<id>", see Live mode).
+  `doc` may be omitted when only one is open (with the app connected: the app's active document).
 - Pixel coordinates are 0-based from the top-left. Rectangles are {x, y, w, h}; shape corners are inclusive.
 - Layers are 0-based with 0 at the BOTTOM of the stack; a group appears right below its children. Layers can
   also be addressed by exact name. Frames are 0-based. (Lua scripts are 1-based for layers/frames/tags.)
@@ -25,6 +26,25 @@ engine in-process; every tool call edits real documents with the same code the d
 - Every mutating call is exactly one undo step (undo / redo / history). Wrap a multi-call edit in
   transaction begin/end to make it one step. Failed calls change nothing.
 - While a selection exists, drawing, fills, gradients and filters only touch selected pixels. select none clears it.
+
+## Live mode (the Pixmith app)
+- When the Pixmith app is open on this computer, the tools edit ITS documents: the user watches every edit appear in
+  the window, and each call is one undo step named "AI: <tool>" that they can take back with Cmd/Ctrl+Z. Without
+  the app everything works headless, in documents kept inside this server (ids "d1", "d2", ...).
+- app_status tells which one you have: connected or not, the app's documents (ids "app:<id>", e.g. "app:doc-3") and
+  the active one. app_connect / app_disconnect switch at runtime (use app_connect after the user starts the app).
+- In live mode `doc` may be omitted to mean the app's ACTIVE document, so the user chooses the target by switching
+  tabs. doc_new / doc_open create the sprite in the app (target "headless" keeps it inside the server instead);
+  doc_save / doc_close / doc_set_active act on the app's tab. doc_list shows both kinds.
+- Tools default to the app's current layer and frame; aiming a tool at another layer or frame moves the app's
+  current one there, so the user sees where you are working. The user may edit at the same time: a call that lost
+  that race is repeated on the new version automatically, and a busy app (open dialog) is retried for a few seconds.
+- Not available on app documents: history, history_goto (the app owns the undo history; transaction does nothing,
+  every call is its own step). undo / redo work when the app supports them and otherwise tell the user to press
+  Cmd/Ctrl+Z. The app's own selection is not visible to tools; a selection made with the select tool lives in this
+  server until someone else changes the document.
+- Prefer a few meaningful calls over thousands of tiny ones: every call is a full round trip to the window and an
+  undo step. draw_pixels (batches), draw_polygon and run_lua are good for bigger drawings.
 
 ## Looking at your work
 - render returns a PNG you can see (auto-scaled, checkerboard = transparent). Render after each meaningful step.

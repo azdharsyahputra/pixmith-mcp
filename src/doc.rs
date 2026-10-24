@@ -70,6 +70,11 @@ impl Doc {
         if ptr.is_null() { Err(fail("could not create the document")) } else { Ok(Doc { ptr }) }
     }
 
+    /// A document around an existing sprite (no history, not dirty).
+    pub fn from_sprite(sprite: Sprite) -> Doc {
+        Doc { ptr: Box::into_raw(Box::new(Editor::new(sprite))) }
+    }
+
     /// Takes ownership of a document the core allocated (open, import, snapshot); `what` describes the
     /// operation for the error message when `ptr` is null.
     pub fn adopt(ptr: *mut Editor, what: &str) -> Result<Doc, String> {

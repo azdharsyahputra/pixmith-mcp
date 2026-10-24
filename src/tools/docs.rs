@@ -127,9 +127,23 @@ pub struct NewArgs {
     pub color_mode: Option<ColorMode>,
     /// Load a built-in palette by name (see palette action list_presets), e.g. "PICO-8".
     pub palette_preset: Option<String>,
+    /// Where to create it when the Pixmith app is connected: "app" (default; the sprite opens in a new tab of the app)
+    /// or "headless" (kept inside this server only).
+    pub target: Option<Target>,
 }
 
-fn doc_new(e: &mut Engine, a: NewArgs) -> R<Out> {
+/// Where a new document lives (live mode).
+#[derive(Deserialize, JsonSchema, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum Target {
+    App,
+    Headless,
+}
+
+pub fn doc_new(e: &mut Engine, a: NewArgs) -> R<Out> {
+    if a.target == Some(Target::App) {
+        return Err(e.live.not_connected());
+    }
     if a.width == 0 || a.height == 0 || a.width > 16384 || a.height > 16384 {
         return Err("width and height must be 1-16384".into());
     }
@@ -210,16 +224,14 @@ pub struct OpenArgs {
     pub cell_height: Option<u32>,
     /// sheet_json: the sheet image (default: meta.image from the JSON, next to it).
     pub png_path: Option<String>,
+    /// Where to open it when the Pixmith app is connected: "app" (default; a tab of the app) or "headless".
+    pub target: Option<Target>,
 }
 
-fn doc_open(e: &mut Engine, a: OpenArgs) -> R<Out> {
-    let path = e.sandbox.read(&a.path)?;
-    if path.is_dir() {
-        return Err(format!("{}: is a directory", a.path));
-    }
-    let ext = path.extension().map(|x| x.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
-    let format = match a.format.unwrap_or(OpenFormat::Auto) {
-        OpenFormat::Auto => match ext.as_str() {
+/// How `doc_open` reads a file with this (lower-case) extension.
+pub fn open_format(a: &OpenArgs, ext: &str) -> OpenFormat {
+    match a.format.unwrap_or(OpenFormat::Auto) {
+        OpenFormat::Auto => match ext {
             "png" if a.cell_width.is_some() => OpenFormat::SheetGrid,
             "png" => OpenFormat::Png,
             "gif" => OpenFormat::Gif,
@@ -227,7 +239,19 @@ fn doc_open(e: &mut Engine, a: OpenArgs) -> R<Out> {
             _ => OpenFormat::Native,
         },
         f => f,
-    };
+    }
+}
+
+pub fn doc_open(e: &mut Engine, a: OpenArgs) -> R<Out> {
+    if a.target == Some(Target::App) {
+        return Err(e.live.not_connected());
+    }
+    let path = e.sandbox.read(&a.path)?;
+    if path.is_dir() {
+        return Err(format!("{}: is a directory", a.path));
+    }
+    let ext = path.extension().map(|x| x.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+    let format = open_format(&a, &ext);
     let c = cstr(&path.to_string_lossy());
     clear_error();
     let what = format!("could not open {}", a.path);
