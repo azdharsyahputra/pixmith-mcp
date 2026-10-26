@@ -1,0 +1,124 @@
+name: Release
+
+# Push a tag `vX.Y.Z` (matching `version` in Cargo.toml) to build every target, attach the archives to a GitHub
+# release and publish `pixmith-mcp` + `@pixmith/mcp-*` to npm (needs the NPM_TOKEN repository secret).
+# Run it by hand (Actions > Release > Run workflow) for a dry run: everything is built and `npm publish --dry-run`d,
+# nothing is released or published.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ${{ matrix.npm }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { npm: darwin-arm64, target: aarch64-apple-darwin, os: macos-latest }
+          - { npm: darwin-x64, target: x86_64-apple-darwin, os: macos-latest }
+          # 22.04 keeps the glibc requirement at 2.35 so older distributions can run the binary too.
+          - { npm: linux-x64, target: x86_64-unknown-linux-gnu, os: ubuntu-22.04 }
+          - { npm: linux-arm64, target: aarch64-unknown-linux-gnu, os: ubuntu-22.04-arm }
+          - { npm: win32-x64, target: x86_64-pc-windows-msvc, os: windows-latest }
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tag matches Cargo.toml
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          version=$(sed -n 's/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -1)
+          [ "${GITHUB_REF_NAME}" = "v${version}" ] || { echo "tag ${GITHUB_REF_NAME} != v${version} in Cargo.toml"; exit 1; }
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+      - name: Package
+        shell: bash
+        run: |
+          exe=pixmith-mcp; [ "${{ runner.os }}" = Windows ] && exe=pixmith-mcp.exe
+          name=pixmith-mcp-${{ matrix.target }}
+          mkdir -p dist/$name
+          cp target/${{ matrix.target }}/release/$exe README.md LICENSE dist/$name/
+          cp target/${{ matrix.target }}/release/$exe dist/
+          cd dist
+          if [ "${{ runner.os }}" = Windows ]; then 7z a -tzip $name.zip $name >/dev/null; else tar czf $name.tar.gz $name; fi
+          rm -r $name
+      - name: Smoke test
+        if: matrix.target != 'x86_64-apple-darwin'
+        shell: bash
+        run: dist/pixmith-mcp${{ runner.os == 'Windows' && '.exe' || '' }} --version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bin-${{ matrix.npm }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: bin-*
+          path: artifacts
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir upload
+          cp artifacts/*/*.tar.gz artifacts/*/*.zip upload/
+          (cd upload && sha256sum * > SHA256SUMS)
+          gh release create "$GITHUB_REF_NAME" upload/* --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes
+
+  npm:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # npm provenance
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: bin-*
+          path: artifacts
+      - name: Stage the packages
+        run: |
+          node npm/build.mjs dist/npm \
+            darwin-arm64=artifacts/bin-darwin-arm64/pixmith-mcp \
+            darwin-x64=artifacts/bin-darwin-x64/pixmith-mcp \
+            linux-x64=artifacts/bin-linux-x64/pixmith-mcp \
+            linux-arm64=artifacts/bin-linux-arm64/pixmith-mcp \
+            win32-x64=artifacts/bin-win32-x64/pixmith-mcp.exe
+      - name: Publish (platform packages first, then pixmith-mcp)
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          DRY_RUN: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        run: |
+          for dir in dist/npm/mcp-* dist/npm/pixmith-mcp; do
+            spec=$(node -p "const p = require('./$dir/package.json'); p.name + '@' + p.version")
+            if [ "$DRY_RUN" = true ]; then
+              (cd "$dir" && npm publish --access public --dry-run)
+            elif [ -n "$(npm view "$spec" version 2>/dev/null)" ]; then
+              echo "$spec is already on npm, skipping"
+            else
+              (cd "$dir" && npm publish --access public --provenance)
+            fi
+          done

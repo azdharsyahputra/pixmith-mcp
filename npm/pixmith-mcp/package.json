@@ -1,0 +1,20 @@
+{
+  "name": "pixmith-mcp",
+  "version": "0.0.0",
+  "description": "Model Context Protocol server for the Pixmith pixel-art editor: lets AI agents create, edit, inspect and export sprites",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/azdharsyahputra/pixmith-mcp.git"
+  },
+  "homepage": "https://github.com/azdharsyahputra/pixmith-mcp#readme",
+  "keywords": ["mcp", "model-context-protocol", "pixel-art", "sprite", "aseprite", "ai"],
+  "bin": {
+    "pixmith-mcp": "bin/pixmith-mcp.js"
+  },
+  "files": ["bin"],
+  "engines": {
+    "node": ">=16"
+  },
+  "optionalDependencies": {}
+}

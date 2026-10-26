@@ -20,7 +20,17 @@ Gemini CLI, VS Code / GitHub Copilot, Windsurf, Cline, Zed, ...). Streamable HTT
 
 ## Install
 
-You need a Rust toolchain (1.99 or newer) and a C compiler (for the embedded Lua).
+Nothing to install if you have Node.js (16 or newer): every client can start the server with `npx`, which downloads
+the prebuilt binary for your platform (macOS arm64 / x64, Linux x64 / arm64, Windows x64) once and caches it.
+
+```json
+{ "command": "npx", "args": ["-y", "pixmith-mcp"] }
+```
+
+Add `"--root", "/Users/me/art"` and the other options below to `args` after `"pixmith-mcp"`. The npm package
+`pixmith-mcp` only holds a small launcher; the binary comes from `@pixmith/mcp-<platform>-<arch>`.
+
+Or build it from source, with a Rust toolchain (1.99 or newer) and a C compiler (for the embedded Lua):
 
 ```sh
 cargo install --git https://github.com/azdharsyahputra/pixmith-mcp
@@ -28,7 +38,9 @@ cargo install --git https://github.com/azdharsyahputra/pixmith-mcp
 cargo build --release        # -> target/release/pixmith-mcp
 ```
 
-Then print the configuration for your client, with the binary's absolute path already filled in:
+Prebuilt archives are also attached to every [GitHub release](https://github.com/azdharsyahputra/pixmith-mcp/releases).
+
+With a binary on disk (not through `npx`), print the configuration for your client with its absolute path filled in:
 
 ```sh
 pixmith-mcp print-config claude-code       # also: claude-desktop codex antigravity cursor gemini vscode windsurf json
@@ -40,14 +52,17 @@ pixmith-mcp print-config cursor --live off      # never use the Pixmith app (def
 
 ## Client setup
 
-Replace `/path/to/pixmith-mcp` with the real path (`which pixmith-mcp`, or use `print-config`). The optional
+Claude Code, Claude Desktop and Cursor below start the server with `npx` (see [Install](#install)); with a binary
+built from source, use its path instead of `npx -y pixmith-mcp`. The other examples show a binary path: replace
+`/path/to/pixmith-mcp` with the real one (`which pixmith-mcp`, or use `print-config`), or use `"command": "npx"` with
+`"-y", "pixmith-mcp"` first in `args`. The optional
 `--root <dir>` limits file access to one folder (recommended, see [Security](#security)); `--allow-dir <dir>` (repeatable) additionally allows reading files and writing `export` output in another folder, such as a temp dir; `--live auto|on|off` controls
 [live mode](#live-mode-edit-the-open-pixmith-app).
 
 ### Claude Code
 
 ```sh
-claude mcp add pixmith -- /path/to/pixmith-mcp --root ~/art
+claude mcp add pixmith -- npx -y pixmith-mcp --root ~/art
 # --scope user: every project; --scope project: shared through .mcp.json in the repository
 ```
 
@@ -59,7 +74,7 @@ Settings > Developer > Edit Config (`~/Library/Application Support/Claude/claude
 ```json
 {
   "mcpServers": {
-    "pixmith": { "command": "/path/to/pixmith-mcp", "args": ["--root", "/Users/me/art"] }
+    "pixmith": { "command": "npx", "args": ["-y", "pixmith-mcp", "--root", "/Users/me/art"] }
   }
 }
 ```
@@ -94,7 +109,7 @@ Agent panel > `...` > MCP Servers > Manage MCP Servers > View raw config. The fi
 ```json
 {
   "mcpServers": {
-    "pixmith": { "command": "/path/to/pixmith-mcp", "args": ["--root", "/Users/me/art"] }
+    "pixmith": { "command": "npx", "args": ["-y", "pixmith-mcp", "--root", "/Users/me/art"] }
   }
 }
 ```
@@ -354,6 +369,11 @@ cargo test                                   # unit tests + the binary driven ov
 cargo fmt --all -- --check && cargo clippy --all-targets -- -D warnings
 npx @modelcontextprotocol/inspector --cli target/debug/pixmith-mcp --method tools/list
 ```
+
+Releases: bump `version` in `Cargo.toml` and push the tag `vX.Y.Z`. `.github/workflows/release.yml` builds every
+platform, attaches the archives to a GitHub release and publishes the npm packages that `npm/build.mjs` stages (run the
+workflow by hand for a dry run). It needs the `NPM_TOKEN` repository secret, an npm automation token allowed to publish
+`pixmith-mcp` and the `@pixmith` scope.
 
 `pixmith-core` comes from the Pixmith repository, pinned to a commit in `Cargo.toml`; uncomment the `[patch]` section
 there to build against a local checkout. See [CONTRIBUTING.md](CONTRIBUTING.md).
