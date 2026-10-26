@@ -22,6 +22,8 @@ pub const UNKNOWN_DOC: i64 = -32004;
 /// `game.capture` found no running game, or no frame arrived in time.
 pub const NO_GAME: i64 = -32012;
 pub const NO_METHOD: i64 = -32601;
+/// Bad or unknown parameters (an app that does not know a newer parameter).
+pub const INVALID_PARAMS: i64 = -32602;
 
 #[derive(Debug)]
 pub enum RpcError {

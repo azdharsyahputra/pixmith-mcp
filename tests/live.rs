@@ -274,7 +274,9 @@ fn doc_new_creates_the_sprite_in_the_app() {
     let r = c.ok("doc_new", json!({ "width": 4, "height": 4, "background": "#ff0000", "palette_preset": "PICO-8" }));
     assert_eq!(r["doc"], "app:doc-2", "{r}");
     assert_eq!(mock.pixel("doc-2", 3, 3), RED);
-    assert_eq!(mock.undo_labels("doc-2"), vec!["AI: doc_new"]);
+    // The whole document arrives in the one `documents.new` request: no apply, no undo step.
+    assert_eq!(mock.undo_labels("doc-2"), Vec::<String>::new());
+    assert_eq!(mock.applies(), 0);
     // New documents become the active one; tools find it without `doc`.
     c.ok("draw_pixels", json!({ "points": [[0, 0]], "color": "#00ff00" }));
     assert_eq!(mock.pixel("doc-2", 0, 0), [0, 255, 0, 255]);
@@ -309,7 +311,8 @@ fn doc_open_native_goes_through_the_app_and_other_formats_are_imported_into_a_ne
     assert_eq!(r["doc"], "app:doc-2", "{r}");
     assert!(r["imported_from"].as_str().unwrap().ends_with("art.png"));
     assert_eq!(mock.pixel("doc-2", 1, 1), RED);
-    assert_eq!(mock.undo_labels("doc-2"), vec!["AI: doc_open"]);
+    assert_eq!(mock.undo_labels("doc-2"), Vec::<String>::new());
+    assert_eq!(mock.applies(), 0);
     let e = c.err("doc_open", json!({ "path": "missing.pxmt" }));
     assert!(e.contains("missing.pxmt"), "{e}");
 }
@@ -884,10 +887,26 @@ fn doc_save_replace_closes_a_clean_tab_that_holds_the_file() {
 }
 
 #[test]
-fn a_failed_import_does_not_leave_a_half_built_tab() {
+fn an_import_is_one_atomic_documents_new_request() {
     let (mut c, mock) = start();
     let png = tiny_png(&c, "sheet.png");
-    mock.with(|s| s.apply_fail_next = 1);
+    mock.clear_calls();
+    let r = c.ok("doc_open", json!({ "path": png.to_string_lossy(), "target": "app" }));
+    assert_eq!(r["doc"], "app:doc-2", "{r}");
+    assert_eq!(mock.count("documents.new"), 1);
+    assert_eq!(mock.applies(), 0, "no second request that could fail and leave a one-frame tab");
+    assert_eq!(mock.pixel("doc-2", 1, 1), RED);
+}
+
+#[test]
+fn a_failed_import_with_an_older_app_does_not_leave_a_half_built_tab() {
+    let (mut c, mock) = start();
+    let png = tiny_png(&c, "sheet.png");
+    // An app without `documents.new` from pxmt: the client falls back to new + apply and cleans up after a failure.
+    mock.with(|s| {
+        s.no_pxmt_new = true;
+        s.apply_fail_next = 1;
+    });
     let e = c.err("doc_open", json!({ "path": png.to_string_lossy(), "target": "app" }));
     assert!(e.contains("could not apply") && e.contains("was closed again"), "{e}");
     assert_eq!(mock.doc_count(), 1, "the tab made for the import is gone");

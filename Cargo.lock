@@ -765,7 +765,7 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 [[package]]
 name = "pixmith-core"
 version = "0.1.0"
-source = "git+https://github.com/azdharsyahputra/pixmith?rev=79ba739c75b9bcdafc89c1f86c6b2b305f373adf#79ba739c75b9bcdafc89c1f86c6b2b305f373adf"
+source = "git+https://github.com/azdharsyahputra/pixmith?rev=c55f93610dad804a73de3516f74a8a43bdf0e473#c55f93610dad804a73de3516f74a8a43bdf0e473"
 dependencies = [
  "flate2",
  "gif",

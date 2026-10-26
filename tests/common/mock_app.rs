@@ -61,6 +61,8 @@ pub struct State {
     pub no_game_view: bool,
     /// Fail the next n `documents.apply` with a generic error (-32000), like an app that choked on a big document.
     pub apply_fail_next: u32,
+    /// An older app: `documents.new` knows only width and height (a `pxmt` request is -32602).
+    pub no_pxmt_new: bool,
     /// Close every client connection (the listener stays up), like an app that dropped the socket.
     pub drop_connections: bool,
 }
@@ -208,6 +210,16 @@ fn handle(state: &mut State, method: &str, p: &Value) -> Result<Value, (i64, Str
                 done += 1;
             }
             Ok(json!({ "document": state.doc_json(&state.docs[i]), "steps": done }))
+        }
+        "documents.new" if p.get("pxmt").is_some() && !state.no_pxmt_new => {
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(p["pxmt"].as_str().unwrap_or_default())
+                .map_err(|e| (-32602, e.to_string()))?;
+            let sprite = pxmt::read_document(&bytes).map_err(|e| (-32000, e))?;
+            let name = p["name"].as_str().map(str::to_string).unwrap_or_else(|| format!("Untitled {}", state.next + 1));
+            let id = state.add(sprite, &name, None);
+            let i = state.docs.iter().position(|d| d.id == id).unwrap();
+            Ok(json!({ "document": state.doc_json(&state.docs[i]) }))
         }
         "documents.new" => {
             let w = p["width"].as_u64().ok_or((-32602, "width".to_string()))? as u32;

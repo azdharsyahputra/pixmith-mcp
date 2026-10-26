@@ -165,3 +165,24 @@ fn run_lua_reads_images_inside_allow_paths_and_sees_only_its_own_documents() {
     let r = c.ok("run_lua", json!({ "doc": "d1", "source": "print(#app.sprites)" }));
     assert_eq!(r["output"], "1", "{r}");
 }
+
+#[test]
+fn slice_pivots_are_absent_until_set_and_a_frameless_set_covers_every_key() {
+    let mut c = Client::start(&[]);
+    c.ok("doc_new", json!({ "width": 8, "height": 8 }));
+    c.ok("frame", json!({ "action": "add", "count": 5 }));
+    c.ok("slice", json!({ "action": "add", "name": "plain", "bounds": { "x": 0, "y": 0, "w": 4, "h": 4 } }));
+    let r = c.ok("slice", json!({ "action": "list", "frame": 0 }));
+    assert_eq!(r["slices"][0]["pivot"], serde_json::Value::Null, "no pivot yet, not [0, 0]: {r}");
+    // The Lua repro: a pivot set without a frame while another frame is active.
+    let lua = "app.activeFrame = 4\nlocal s = sprite:newSlice('mc', 0, 0, 4, 4)\ns:setPivot(2, 3)\n\
+               print(tostring(s:getPivot(1)), tostring(s:getPivot(5)))";
+    let r = c.ok("run_lua", json!({ "source": lua }));
+    assert!(!r["output"].as_str().unwrap().contains("nil"), "{r}");
+    let r = c.ok("slice", json!({ "action": "list", "frame": 0 }));
+    let mc = r["slices"].as_array().unwrap().iter().find(|s| s["name"] == "mc").unwrap();
+    assert_eq!(mc["pivot"], json!([2, 3]), "{r}");
+    // A fractional frame duration is a clear error, not an out-of-range conversion.
+    let e = c.err("run_lua", json!({ "source": "sprite.frames[1].duration = 0.1" }));
+    assert!(!e.contains("out of range"), "{e}");
+}

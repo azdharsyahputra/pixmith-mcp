@@ -19,7 +19,7 @@ mod client;
 mod discovery;
 
 pub use client::AppDoc;
-use client::{BUSY, Conn, NO_GAME, NO_METHOD, RpcError, STALE, UNKNOWN_DOC, UNSAVED};
+use client::{BUSY, Conn, INVALID_PARAMS, NO_GAME, NO_METHOD, RpcError, STALE, UNKNOWN_DOC, UNSAVED};
 
 use crate::doc::Doc;
 use crate::engine::{DocEntry, Engine, R};
@@ -713,18 +713,7 @@ fn new_in_app(e: &mut Engine, call: &Call, args: Value) -> R<Out> {
     let extras = a.palette_preset.is_some()
         || a.background.is_some_and(|c| c.0 & 0xFF != 0)
         || a.color_mode.is_some_and(|m| m.code() != 0);
-    let mut params = json!({ "width": a.width, "height": a.height });
-    if let Some(n) = &a.name {
-        params["name"] = json!(n);
-    }
-    let v = e.live.rpc_busy("documents.new", params).map_err(|x| explain(&x, "the new document"))?;
-    let mut doc = created_doc(&v)?;
-    if extras {
-        match e.live.apply(&doc.id, doc.revision, temp.doc.sprite(), "doc_new", None, None) {
-            Ok(d) => doc = d,
-            Err(x) => return Err(abandon(e, &doc, explain(&x, &doc.tool_id()))),
-        }
-    }
+    let doc = new_tab(e, a.name.as_deref(), temp.doc.sprite(), "doc_new", extras, "the new document")?;
     match app_summary(e, &doc) {
         Ok(s) => Out::json(s),
         Err(m) => Err(abandon(e, &doc, m)),
@@ -745,16 +734,7 @@ fn open_in_app(e: &mut Engine, call: &Call, args: Value) -> R<Out> {
     // PNG, GIF and sheet imports are built here and handed to a new tab.
     (call.def.run)(e, args)?;
     let temp = e.take_last().ok_or("internal error: no document was created")?;
-    let (w, h) = (temp.doc.width(), temp.doc.height());
-    let v = e
-        .live
-        .rpc_busy("documents.new", json!({ "width": w, "height": h, "name": temp.name }))
-        .map_err(|x| explain(&x, &a.path))?;
-    let created = created_doc(&v)?;
-    let doc = match e.live.apply(&created.id, created.revision, temp.doc.sprite(), "doc_open", None, None) {
-        Ok(d) => d,
-        Err(x) => return Err(abandon(e, &created, explain(&x, &created.tool_id()))),
-    };
+    let doc = new_tab(e, Some(&temp.name), temp.doc.sprite(), "doc_open", true, &a.path)?;
     let mut s = match app_summary(e, &doc) {
         Ok(s) => s,
         Err(m) => return Err(abandon(e, &doc, m)),
@@ -762,6 +742,44 @@ fn open_in_app(e: &mut Engine, call: &Call, args: Value) -> R<Out> {
     s["imported_from"] = json!(show(&path));
     e.live.sources.insert(doc.id.clone(), path);
     Out::json(s)
+}
+
+/// Creates a tab in the app holding `sprite`. Newer apps take the whole document in one `documents.new` request
+/// (`pxmt`), so the tab appears complete or not at all. An app that does not know the parameter answers -32602;
+/// then the tab is made at the right size and the sprite applied to it, and a failure of that second step closes the
+/// tab again (`apply_after`: false skips the apply for a plain blank document).
+fn new_tab(
+    e: &mut Engine,
+    name: Option<&str>,
+    sprite: &Sprite,
+    label: &str,
+    apply_after: bool,
+    what: &str,
+) -> R<AppDoc> {
+    let bytes = pxmt::write(sprite).map_err(|x| format!("cannot encode the document: {x}"))?;
+    let mut params = json!({ "pxmt": base64::engine::general_purpose::STANDARD.encode(bytes) });
+    if let Some(n) = name {
+        params["name"] = json!(n);
+    }
+    match e.live.rpc_busy("documents.new", params) {
+        Ok(v) => return created_doc(&v),
+        Err(RpcError::Rpc { code: INVALID_PARAMS, .. }) => {}
+        Err(x) => return Err(explain(&x, what)),
+    }
+    // An older app: make the tab, then put the document into it.
+    let mut params = json!({ "width": sprite.width, "height": sprite.height });
+    if let Some(n) = name {
+        params["name"] = json!(n);
+    }
+    let v = e.live.rpc_busy("documents.new", params).map_err(|x| explain(&x, what))?;
+    let created = created_doc(&v)?;
+    if !apply_after {
+        return Ok(created);
+    }
+    match e.live.apply(&created.id, created.revision, sprite, label, None, None) {
+        Ok(d) => Ok(d),
+        Err(x) => Err(abandon(e, &created, explain(&x, &created.tool_id()))),
+    }
 }
 
 /// A call that created a tab in the app failed before the document was complete: closes the half-built tab so the
