@@ -22,7 +22,7 @@ pub fn tools() -> Vec<ToolDef> {
             CHANGE,
             PaletteArgs,
             palette_tool,
-            "Read or edit the document palette (0-based indices; one undo step per call). Actions: get, set (entry `index` to `color`; in indexed mode pixels using it follow), add (append `colors`), insert (`color` at `index`), remove (`indices`), move (`indices` to before `to`), duplicate (`indices`), replace_all (the palette becomes `colors`), sort (by hue or luminance), ramp (insert `steps` blended colors between entries `index` and `to`, in RGB or HSV), from_sprite (palette of the colors used, optionally quantized to max_colors), list_presets, load_preset (`name`), load_file / save_file (`path`, GIMP .gpl or .hex)."
+            "Read or edit the document palette (0-based indices; one undo step per call). Actions: get, set (entry `index` to `color`; in indexed mode pixels using it follow), add (append `colors`), insert (`color` at `index`), remove (`indices`; alias: delete), move (`indices` to before `to`), duplicate (`indices`), replace_all (the palette becomes `colors`), sort (by hue or luminance), ramp (insert `steps` blended colors between entries `index` and `to`, in RGB or HSV), from_sprite (palette of the colors used, optionally quantized to max_colors), list_presets, load_preset (`name`), load_file / save_file (`path`, GIMP .gpl or .hex)."
         ),
         tool!(
             "Color",
@@ -43,6 +43,7 @@ pub enum PaletteAction {
     Set,
     Add,
     Insert,
+    #[serde(alias = "delete")]
     Remove,
     Move,
     Duplicate,

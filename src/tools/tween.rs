@@ -16,7 +16,7 @@ pub fn tools() -> Vec<ToolDef> {
         CHANGE,
         TweenArgs,
         tween,
-        "Animate a layer (or group) by keyframes instead of redrawing it: properties x, y (offset in pixels), rotation (degrees, clockwise), scale_x, scale_y (1 = 100%), opacity (0-1). Between keys the value follows the key's ease: linear, hold, in_quad, out_quad, in_out_quad, in_out_cubic, out_back, out_bounce, or bezier with control points [x1, y1, x2, y2]. Actions: info (keys, pivot, options, the transform at `frame`), set_key, set_keys (several properties at one frame), remove_key, move_key, set_ease, set_pivot / reset_pivot (rotation/scale center), set_options (rotsprite, snap_scale, ignore_opacity), copy_keys / paste_keys, bake (render the tween into real cels: mode all / range / frame; new_layer puts them on a new layer; keep_source keeps the keys), bake_all. Tweened layers already render and export animated; bake when you need real per-frame pixels to edit."
+        "Animate a layer (or group) by keyframes instead of redrawing it: properties x, y (offset in pixels), rotation (degrees, clockwise), scale_x, scale_y (1 = 100%), opacity (0-1). Between keys the value follows the key's ease: linear, hold, in_quad, out_quad, in_out_quad, in_out_cubic, out_back, out_bounce, or bezier with control points [x1, y1, x2, y2]. Actions: info (keys, pivot, options, the transform at `frame`), set_key, set_keys (several properties at one frame), remove_key (alias: delete_key), move_key, set_ease, set_pivot / reset_pivot (rotation/scale center), set_options (rotsprite, snap_scale, ignore_opacity), copy_keys / paste_keys, bake (render the tween into real cels: mode all / range / frame; new_layer puts them on a new layer; keep_source keeps the keys), bake_all. Tweened layers already render and export animated; bake when you need real per-frame pixels to edit."
     )]
 }
 
@@ -55,6 +55,7 @@ pub enum TweenAction {
     Info,
     SetKey,
     SetKeys,
+    #[serde(alias = "delete_key")]
     RemoveKey,
     MoveKey,
     SetEase,

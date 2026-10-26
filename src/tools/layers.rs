@@ -5,12 +5,16 @@ use super::{CHANGE, Out, ToolDef, need, tool};
 use crate::color::Color;
 use crate::doc::{cstr, fail};
 use crate::engine::{DocEntry, Engine, R, Ref, Undo};
+use pixmith_core::Cel;
+use pixmith_core::Editor;
+use pixmith_core::document::color_mode::conform_cel;
 use pixmith_core::document::layers as lf;
 use pixmith_core::ffi::document as core;
 use pixmith_core::formats::import;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::sync::Arc;
 
 pub fn tools() -> Vec<ToolDef> {
     vec![
@@ -21,7 +25,7 @@ pub fn tools() -> Vec<ToolDef> {
             CHANGE,
             LayerArgs,
             layer,
-            "Edit the layer stack (index 0 = bottom; a group comes right below its children in the list). Actions: add (new image layer above `layer`, default above the active one), add_group, duplicate, remove (a group with its children), move_up / move_down (one step), move_to (to stack position `to`), into_group (move into `group`), out_of_group, wrap_in_group (put the layer in a new group), merge_down, set (any of name, visible, opacity 0-255, blend_mode), import_png (PNG file as a new layer). New layers become the active layer. Returns the updated layer list."
+            "Edit the layer stack (index 0 = bottom; a group comes right below its children in the list). Actions: add (new image layer above `layer`, default above the active one), add_group, duplicate, remove (alias: delete; a group with its children), move_up / move_down (one step), move_to (to stack position `to`), into_group (move into `group`), out_of_group, wrap_in_group (put the layer in a new group), merge_down, set (any of name, visible, opacity 0-255, blend_mode), import_png (PNG file as a new layer; with replace=true it instead puts the PNG into the existing `layer` at `frame` in one undo step, keeping the layer's name, order, opacity and blend mode, optionally shifted by x / y). New layers become the active layer. Returns the updated layer list."
         ),
         tool!(
             "Layers & frames",
@@ -30,7 +34,7 @@ pub fn tools() -> Vec<ToolDef> {
             CHANGE,
             FrameArgs,
             frame,
-            "Edit animation frames (0-based). Actions: add (`count` empty frames after `frame`, default after the active one), duplicate (copy `frame` right after itself, `count` times), remove, move (frame `frame` to position `to`), set_duration (milliseconds for `frame`, `frames` list, or every frame with all=true). Tags are adjusted automatically."
+            "Edit animation frames (0-based). Actions: add (`count` empty frames after `frame`, default after the active one), duplicate (copy `frame` right after itself, `count` times), remove (alias: delete), move (frame `frame` to position `to`), set_duration (milliseconds for `frame`, `frames` list, or every frame with all=true). Tags are adjusted automatically."
         ),
         tool!(
             "Layers & frames",
@@ -39,7 +43,7 @@ pub fn tools() -> Vec<ToolDef> {
             CHANGE,
             CelArgs,
             cel,
-            "Edit cels (the image of one layer in one frame). Actions: link (frames from_frame..to_frame of `layer` share the image of from_frame), unlink, set_opacity, clear (remove the images of a block of layers x frames), copy (a block to the cel clipboard), paste (clipboard at layer/frame), move (shift a block by dl layers / df frames; copy=true duplicates)."
+            "Edit cels (the image of one layer in one frame). Actions: link (frames from_frame..to_frame of `layer` share the image of from_frame), unlink, set_opacity, clear (alias: remove / delete; drops the images of a block of layers x frames), copy (a block to the cel clipboard), paste (clipboard at layer/frame), move (shift a block by dl layers / df frames; copy=true duplicates)."
         ),
         tool!(
             "Layers & frames",
@@ -48,7 +52,7 @@ pub fn tools() -> Vec<ToolDef> {
             CHANGE,
             TagArgs,
             tag,
-            "Animation tags (named frame ranges used for playback and exports). Actions: add (name, from, to), update (any of name, from, to, direction, repeat, color), remove. direction: forward, reverse, ping_pong, ping_pong_reverse; repeat 0 = forever."
+            "Animation tags (named frame ranges used for playback and exports). Actions: add (name, from, to), update (any of name, from, to, direction, repeat, color), remove (alias: delete). direction: forward, reverse, ping_pong, ping_pong_reverse; repeat 0 = forever."
         ),
     ]
 }
@@ -59,6 +63,7 @@ pub enum LayerAction {
     Add,
     AddGroup,
     Duplicate,
+    #[serde(alias = "delete")]
     Remove,
     MoveUp,
     MoveDown,
@@ -118,6 +123,53 @@ pub struct LayerArgs {
     pub path: Option<String>,
     /// import_png: frame to put it in (default: active).
     pub frame: Option<u32>,
+    /// import_png: true replaces the pixels of the existing `layer` (default: active) at `frame` with the PNG, as ONE
+    /// undo step, instead of adding a new layer. The layer keeps its name, position, opacity and blend mode (a cel
+    /// that was linked to other frames becomes independent). `name` renames the layer. The cel becomes exactly the
+    /// PNG on a transparent canvas.
+    pub replace: Option<bool>,
+    /// import_png with replace: canvas x where the PNG's left edge goes (default 0; may be negative; the PNG is
+    /// clipped to the canvas).
+    pub x: Option<i32>,
+    /// import_png with replace: canvas y where the PNG's top edge goes (default 0).
+    pub y: Option<i32>,
+}
+
+/// Puts `rgba` (`w` x `h`) at (`ox`, `oy`) on a transparent canvas-sized cel and makes it the cel of `layer` at
+/// `frame`, keeping the old cel's opacity, z-index and user data. One checkpoint, so the caller's undo step holds it.
+fn replace_cel(
+    ed: &mut Editor,
+    (layer, frame): (usize, usize),
+    rgba: &[u8],
+    (w, h): (usize, usize),
+    (ox, oy): (i64, i64),
+) {
+    ed.checkpoint();
+    ed.dirty.mark_all();
+    let s = &mut ed.sprite;
+    s.flush_links();
+    let (cw, ch) = (s.width as i64, s.height as i64);
+    let mut px = vec![0u8; (cw * ch * 4) as usize];
+    for sy in 0..h as i64 {
+        let dy = sy + oy;
+        let dx0 = ox.max(0);
+        let sx0 = dx0 - ox;
+        let n = (w as i64 - sx0).min(cw - dx0);
+        if dy < 0 || dy >= ch || n <= 0 {
+            continue;
+        }
+        let src = (sy as usize * w + sx0 as usize) * 4;
+        let dst = (dy as usize * cw as usize + dx0 as usize) * 4;
+        px[dst..dst + n as usize * 4].copy_from_slice(&rgba[src..src + n as usize * 4]);
+    }
+    let mut cel = Cel { opacity: 255, pixels: px, ..Default::default() };
+    if let Some(old) = &s.cels[frame][layer] {
+        cel.opacity = old.opacity;
+        cel.z_index = old.z_index;
+        cel.user_data = old.user_data.clone();
+    }
+    s.cels[frame][layer] = Some(Arc::new(cel));
+    conform_cel(s, layer, frame);
 }
 
 /// Compact layer list for results.
@@ -134,6 +186,13 @@ fn layer(e: &mut Engine, a: LayerArgs) -> R<Out> {
         (LayerAction::ImportPng, None) => return Err("import_png needs `path`".into()),
         _ => None,
     };
+    let replace = a.replace.unwrap_or(false);
+    if a.action != LayerAction::ImportPng && (replace || a.x.is_some() || a.y.is_some()) {
+        return Err("`replace`, `x` and `y` belong to action import_png".into());
+    }
+    if !replace && (a.x.is_some() || a.y.is_some()) {
+        return Err("`x` and `y` need replace=true (a new layer from a PNG always starts at the top-left)".into());
+    }
     let d = e.doc(&a.doc)?;
     let act = super::act(&a.action);
     let raw = d.doc.raw();
@@ -229,6 +288,28 @@ fn layer(e: &mut Engine, a: LayerArgs) -> R<Out> {
             })?;
             None
         }
+        LayerAction::ImportPng if replace => {
+            let l = d.image_layer(&a.layer)?;
+            if d.is_tilemap(l) {
+                return Err(format!(
+                    "layer {l} ({:?}) is a tilemap layer; replace works on image layers",
+                    d.layer_name(l)
+                ));
+            }
+            let f = d.frame(a.frame)?;
+            let path = src.expect("checked");
+            let bytes = std::fs::read(&path).map_err(|err| format!("{}: {err}", path.display()))?;
+            let (w, h, rgba) = import::decode_png(&bytes).map_err(|err| format!("{}: {err}", path.display()))?;
+            let (ox, oy) = (a.x.unwrap_or(0) as i64, a.y.unwrap_or(0) as i64);
+            d.edit("Replace Layer from PNG", Undo::Step, |_| {
+                // SAFETY: `raw` is the live editor of `d`, used only on this thread.
+                replace_cel(unsafe { &mut *raw }, (l as usize, f as usize), &rgba, (w, h), (ox, oy));
+                rename(l, &a.name);
+                Ok(())
+            })?;
+            d.layer = l;
+            None
+        }
         LayerAction::ImportPng => {
             let f = d.frame(a.frame)?;
             let c = cstr(&src.expect("checked").to_string_lossy());
@@ -250,6 +331,10 @@ fn layer(e: &mut Engine, a: LayerArgs) -> R<Out> {
     if let Some(i) = new_index {
         v["layer"] = json!(i);
     }
+    if a.action == LayerAction::ImportPng && replace {
+        v["layer"] = json!(d.layer);
+        v["replaced"] = json!({ "layer": d.layer, "frame": a.frame.unwrap_or(d.frame) });
+    }
     if a.action == LayerAction::Set {
         v["layer"] = json!(l);
         v["blend_mode"] = json!(BLEND_NAMES[unsafe { lf::pixmith_layer_blend_mode(raw, l) } as usize % 19]);
@@ -263,6 +348,7 @@ fn layer(e: &mut Engine, a: LayerArgs) -> R<Out> {
 pub enum FrameAction {
     Add,
     Duplicate,
+    #[serde(alias = "delete")]
     Remove,
     Move,
     SetDuration,
@@ -354,6 +440,7 @@ pub enum CelAction {
     Link,
     Unlink,
     SetOpacity,
+    #[serde(alias = "remove", alias = "delete")]
     Clear,
     Copy,
     Paste,
@@ -459,6 +546,7 @@ fn cel(e: &mut Engine, a: CelArgs) -> R<Out> {
 pub enum TagAction {
     Add,
     Update,
+    #[serde(alias = "delete")]
     Remove,
 }
 

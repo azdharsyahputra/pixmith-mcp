@@ -2,7 +2,7 @@
 
 mod common;
 use common::mock_app::{GAME_H, GAME_W, MockApp, live_dir};
-use common::{Client, decode_png};
+use common::{Client, decode_png, write_png};
 use serde_json::{Value, json};
 
 fn start_with(extra: &[&str], env: &[(&str, &str)]) -> (Client, MockApp) {
@@ -456,8 +456,11 @@ fn no_app_means_headless_exactly_as_before() {
     assert_eq!(s["connected"], false);
     assert_eq!(s["mode"], "auto");
     assert!(s["reason"].as_str().unwrap().contains("no running Pixmith app"), "{s}");
-    assert_eq!(c.ok("doc_new", json!({ "width": 8, "height": 8 }))["doc"], "d1");
-    c.ok("draw_shape", json!({ "shape": "line", "from": [0, 0], "to": [7, 7], "color": "#ff0000" }));
+    let r = c.ok("doc_new", json!({ "width": 8, "height": 8 }));
+    assert_eq!(r["doc"], "d1");
+    assert!(r.get("target").is_none(), "never connected: no live clutter in the result: {r}");
+    let r = c.ok("draw_shape", json!({ "shape": "line", "from": [0, 0], "to": [7, 7], "color": "#ff0000" }));
+    assert!(r.get("target").is_none(), "{r}");
     assert_eq!(c.pixel(3, 3), "#ff0000ff");
     c.ok("undo", json!({}));
     assert_eq!(c.pixel(3, 3), "#00000000");
@@ -482,9 +485,12 @@ fn the_app_can_start_or_quit_while_the_server_runs() {
     mock.add_blank(8, 8, "late.pxmt");
     c.ok("draw_pixels", json!({ "points": [[0, 0]], "color": "#ff0000" }));
     assert_eq!(mock.pixel("doc-1", 0, 0), RED);
-    // The app quits: calls without `doc` fall back to the headless document, explicit app ids say what happened.
+    // The app quits: this server was connected, so calls without `doc` no longer fall back to the headless document
+    // silently (see the lost-connection test); explicit ids still work, explicit app ids say what happened.
     mock.quit();
-    c.ok("draw_pixels", json!({ "points": [[1, 1]], "color": "#00ff00" }));
+    let e = c.err("draw_pixels", json!({ "points": [[1, 1]], "color": "#00ff00" }));
+    assert!(e.contains("was connected but is not reachable"), "{e}");
+    c.ok("draw_pixels", json!({ "doc": "d1", "points": [[1, 1]], "color": "#00ff00" }));
     assert_eq!(c.ok("get_pixel", json!({ "doc": "d1", "x": 1, "y": 1 }))["color"], "#00ff00ff");
     let e = c.err("get_pixel", json!({ "doc": "app:doc-1", "x": 0, "y": 0 }));
     assert!(e.contains("not connected") || e.contains("connection"), "{e}");
@@ -655,4 +661,193 @@ fn base64_png(result: &Value) -> Vec<u8> {
     use base64::Engine as _;
     let img = result["content"].as_array().unwrap().iter().find(|c| c["type"] == "image").expect("image");
     base64::engine::general_purpose::STANDARD.decode(img["data"].as_str().unwrap()).unwrap()
+}
+
+// MARK: Lost connections, replace, parallel calls, headless housekeeping
+
+const PROBLEM: &str = "was connected but is not reachable";
+
+#[test]
+fn a_lost_connection_is_an_error_not_a_silent_headless_document() {
+    let (mut c, mock) = start();
+    c.ok("draw_pixels", json!({ "points": [[0, 0]], "color": "#ff0000" }));
+    assert_eq!(mock.pixel("doc-1", 0, 0), RED);
+    mock.quit();
+
+    // Creating and editing must not quietly go headless.
+    let e = c.err("doc_new", json!({ "width": 4, "height": 4 }));
+    assert!(e.contains(PROBLEM) && e.contains("target: \"headless\"") && e.contains("app_disconnect"), "{e}");
+    let e = c.err("draw_pixels", json!({ "points": [[1, 1]], "color": "#00ff00" }));
+    assert!(e.contains(PROBLEM), "{e}");
+    let e = c.err("doc_info", json!({}));
+    assert!(e.contains(PROBLEM), "{e}");
+    // What broke is part of the message.
+    assert!(e.contains("the Pixmith app closed") || e.contains("cannot talk") || e.contains("no answer from"), "{e}");
+    // Nothing headless was created behind the user's back.
+    let list = c.ok("doc_list", json!({}));
+    assert_eq!(list["documents"], json!([]), "{list}");
+    assert_eq!(list["app"]["connected"], false);
+    assert!(list["app"]["reason"].as_str().unwrap().contains(PROBLEM), "{list}");
+    let s = c.ok("app_status", json!({}));
+    assert_eq!(s["connected"], false);
+    assert!(s["note"].as_str().unwrap().contains("silently"), "{s}");
+
+    // Headless on purpose still works, and says it is headless.
+    let h = c.ok("doc_new", json!({ "width": 4, "height": 4, "target": "headless" }));
+    assert_eq!(h["doc"], "d1", "{h}");
+    assert_eq!(h["target"], "headless", "{h}");
+    c.ok("draw_pixels", json!({ "doc": "d1", "points": [[1, 1]], "color": "#00ff00" }));
+    // ...but still not by default.
+    let e = c.err("draw_pixels", json!({ "points": [[2, 2]], "color": "#00ff00" }));
+    assert!(e.contains(PROBLEM), "{e}");
+
+    // app_disconnect is the explicit way to work headless: no more errors, results say headless.
+    c.ok("app_disconnect", json!({}));
+    let r = c.ok("doc_new", json!({ "width": 4, "height": 4 }));
+    assert_eq!(r["doc"], "d2");
+    assert_eq!(r["target"], "headless");
+    c.ok("draw_pixels", json!({ "doc": "d2", "points": [[0, 0]], "color": "#fff" }));
+    // The app is still gone: app_connect says so (and does not turn the disconnect off by itself).
+    let e = c.err("app_connect", json!({}));
+    assert!(e.contains("no running Pixmith app"), "{e}");
+}
+
+#[test]
+fn a_restarted_app_is_picked_up_after_the_connection_was_lost() {
+    let dir = tempfile::tempdir().unwrap();
+    let support = Client::support(dir.path());
+    let first = MockApp::start_as(&support, std::process::id(), 100);
+    first.add_blank(8, 8, "one.pxmt");
+    let mut c = Client::start_in(dir, &[]);
+    c.ok("draw_pixels", json!({ "points": [[0, 0]], "color": "#ff0000" }));
+    first.quit();
+    let e = c.err("draw_pixels", json!({ "points": [[1, 1]], "color": "#ff0000" }));
+    assert!(e.contains(PROBLEM), "{e}");
+    // The app comes back: the very next call reconnects (once) and works.
+    let second = MockApp::start_as(&support, std::process::id(), 200);
+    second.add_blank(8, 8, "two.pxmt");
+    c.ok("draw_pixels", json!({ "points": [[1, 1]], "color": "#ff0000" }));
+    assert_eq!(second.pixel("doc-1", 1, 1), RED);
+    let r = c.ok("doc_new", json!({ "width": 4, "height": 4 }));
+    assert_eq!(r["doc"], "app:doc-2", "{r}");
+}
+
+#[test]
+fn a_broken_socket_is_reconnected_once_before_giving_up() {
+    // The app is still there (same discovery file) but our socket is dead: the probe before a create reconnects.
+    let (mut c, mock) = start();
+    c.ok("draw_pixels", json!({ "points": [[0, 0]], "color": "#ff0000" }));
+    let hellos = mock.with(|s| s.hellos);
+    // Drop every connection from the app's side while its listener stays up.
+    mock.with(|s| s.drop_connections = true);
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    mock.with(|s| s.drop_connections = false);
+    let r = c.ok("doc_new", json!({ "width": 4, "height": 4 }));
+    assert_eq!(r["doc"], "app:doc-2", "{r}");
+    assert_eq!(mock.with(|s| s.hellos), hellos + 1, "reconnected exactly once");
+}
+
+#[test]
+fn a_call_that_lands_on_a_headless_document_while_connected_says_so() {
+    let (mut c, _mock) = start_with(&[], &[]);
+    // Connected, the app has no document, so a call without `doc` can only use the headless one.
+    c.ok("doc_new", json!({ "width": 4, "height": 4, "target": "headless" }));
+    let r = c.ok("get_pixel", json!({ "x": 0, "y": 0 }));
+    assert_eq!(r["target"], "headless", "{r}");
+    // An explicit id is deliberate and stays quiet.
+    let r = c.ok("get_pixel", json!({ "doc": "d1", "x": 0, "y": 0 }));
+    assert!(r.get("target").is_none(), "{r}");
+}
+
+#[test]
+fn layer_import_png_replace_is_one_labelled_step_in_the_app() {
+    let (mut c, mock) = start();
+    write_png(&c.path("red.png"), 2, 2, &[RED; 4].concat());
+    mock.clear_calls();
+    let r = c.ok("layer", json!({ "action": "import_png", "path": "red.png", "replace": true, "x": 2, "y": 3 }));
+    assert_eq!(r["layers"].as_array().unwrap().len(), 1, "{r}");
+    assert_eq!(mock.applies(), 1);
+    assert_eq!(mock.undo_labels("doc-1"), vec!["AI: layer import_png"]);
+    for (x, y) in [(2, 3), (3, 3), (2, 4), (3, 4)] {
+        assert_eq!(mock.pixel("doc-1", x, y), RED, "({x}, {y})");
+    }
+    assert_eq!(mock.pixel("doc-1", 1, 3), CLEAR);
+    // Replacing again swaps the pixels: still one layer, a second step.
+    write_png(&c.path("blue.png"), 1, 1, &[0, 0, 255, 255]);
+    c.ok("layer", json!({ "action": "import_png", "path": "blue.png", "replace": true }));
+    assert_eq!(mock.pixel("doc-1", 0, 0), [0, 0, 255, 255]);
+    assert_eq!(mock.pixel("doc-1", 2, 3), CLEAR, "the old pixels are gone");
+    assert_eq!(mock.undo_labels("doc-1").len(), 2);
+    assert_eq!(c.ok("doc_info", json!({ "sections": ["layers"] }))["layers"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn parallel_doc_new_calls_run_one_at_a_time_and_none_is_lost() {
+    let (mut c, mock) = start();
+    let calls: Vec<(&str, Value)> = (0..8)
+        .map(|i| ("doc_new", json!({ "width": 4 + i, "height": 4, "name": format!("p{i}"), "background": "#ff0000" })))
+        .collect();
+    let results = c.call_many(&calls);
+    assert_eq!(mock.doc_count(), 9, "doc-1 plus eight new documents");
+    let mut ids = Vec::new();
+    for (i, r) in results.iter().enumerate() {
+        assert_eq!(r["isError"], json!(false), "{r}");
+        let v: Value = serde_json::from_str(r["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(v["name"], format!("p{i}"), "each answer belongs to its own request: {v}");
+        assert_eq!(v["width"], 4 + i as u64, "{v}");
+        assert_eq!(v["target"], "app");
+        let id = v["doc"].as_str().unwrap().to_string();
+        assert_eq!(mock.pixel(id.strip_prefix("app:").unwrap(), 0, 0), RED, "{id}");
+        ids.push(id);
+    }
+    ids.sort();
+    ids.dedup();
+    assert_eq!(ids.len(), 8, "{ids:?}");
+    // Mixed parallel work (create, edit, close) keeps every request whole too.
+    let target = ids[0].clone();
+    let mixed = c.call_many(&[
+        ("doc_new", json!({ "width": 5, "height": 5 })),
+        ("draw_pixels", json!({ "doc": target, "points": [[1, 1]], "color": "#00ff00" })),
+        ("doc_close", json!({ "doc": ids[1], "discard_changes": true })),
+        ("doc_new", json!({ "width": 6, "height": 6 })),
+    ]);
+    assert!(mixed.iter().all(|r| r["isError"] == json!(false)), "{mixed:?}");
+    assert_eq!(mock.doc_count(), 10);
+}
+
+#[test]
+fn closing_all_headless_documents_never_touches_the_app() {
+    let (mut c, mock) = start();
+    for _ in 0..2 {
+        c.ok("doc_new", json!({ "width": 4, "height": 4, "target": "headless" }));
+    }
+    mock.clear_calls();
+    let r = c.ok("doc_close", json!({ "all_headless": true }));
+    assert_eq!(r["closed"], json!(["d1", "d2"]), "{r}");
+    assert!(mock.calls().is_empty(), "{:?}", mock.calls());
+    assert_eq!(mock.doc_count(), 1);
+    assert_eq!(c.ok("doc_list", json!({}))["documents"][0]["doc"], "app:doc-1");
+}
+
+#[test]
+fn the_headless_limit_applies_next_to_the_app_and_ignores_app_documents() {
+    let (mut c, mock) = start();
+    let mut last = Value::Null;
+    for _ in 0..33 {
+        last = c.ok("doc_new", json!({ "width": 2, "height": 2, "target": "headless" }));
+    }
+    assert_eq!(last["closed_headless"], json!(["d1"]), "{last}");
+    assert!(last["note"].as_str().unwrap().contains("oldest unmodified"), "{last}");
+    // App documents are not counted and not closed.
+    assert_eq!(mock.doc_count(), 1);
+    let headless = c.ok("doc_list", json!({}))["documents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|d| d["target"] == "headless")
+        .count();
+    assert_eq!(headless, 32);
+    let r = c.ok("doc_new", json!({ "width": 2, "height": 2 }));
+    assert_eq!(r["doc"], "app:doc-2");
+    assert!(r.get("note").is_none(), "{r}");
 }

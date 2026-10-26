@@ -107,6 +107,32 @@ impl Client {
         r["result"].clone()
     }
 
+    /// Sends all the calls at once (like a client making parallel tool calls) and returns the raw results in the
+    /// order of `calls`, whatever order the server answered in.
+    pub fn call_many(&mut self, calls: &[(&str, Value)]) -> Vec<Value> {
+        let first = self.next;
+        for (name, args) in calls {
+            let id = self.next;
+            self.next += 1;
+            self.send(&json!({ "jsonrpc": "2.0", "id": id, "method": "tools/call",
+                               "params": { "name": name, "arguments": args } }));
+        }
+        let mut results: Vec<Option<Value>> = vec![None; calls.len()];
+        while results.iter().any(Option::is_none) {
+            let mut line = String::new();
+            let n = self.out.read_line(&mut line).expect("read");
+            assert!(n > 0, "server closed stdout while waiting for parallel calls");
+            let v: Value = serde_json::from_str(&line).unwrap_or_else(|e| panic!("non-JSON line ({e}): {line}"));
+            if let Some(i) =
+                v["id"].as_u64().and_then(|id| id.checked_sub(first)).filter(|i| (*i as usize) < calls.len())
+            {
+                assert!(v.get("error").is_none(), "protocol error {v}");
+                results[i as usize] = Some(v["result"].clone());
+            }
+        }
+        results.into_iter().map(Option::unwrap).collect()
+    }
+
     /// Calls a tool that must succeed; returns its JSON payload.
     pub fn ok(&mut self, name: &str, args: Value) -> Value {
         let r = self.call(name, args.clone());
@@ -159,6 +185,14 @@ pub fn decode_png(bytes: &[u8]) -> (u32, u32, Vec<u8>) {
     let info = r.next_frame(&mut buf).unwrap();
     buf.truncate(info.buffer_size());
     (info.width, info.height, buf)
+}
+
+/// Writes an RGBA PNG (`rgba` is `w * h * 4` bytes).
+pub fn write_png(path: &Path, w: u32, h: u32, rgba: &[u8]) {
+    let mut enc = png::Encoder::new(std::fs::File::create(path).unwrap(), w, h);
+    enc.set_color(png::ColorType::Rgba);
+    enc.set_depth(png::BitDepth::Eight);
+    enc.write_header().unwrap().write_image_data(rgba).unwrap();
 }
 
 pub fn png_size(path: &Path) -> (u32, u32) {

@@ -59,6 +59,8 @@ pub struct State {
     pub game: bool,
     /// `game.capture` is unknown to this "older" app (-32601).
     pub no_game_view: bool,
+    /// Close every client connection (the listener stays up), like an app that dropped the socket.
+    pub drop_connections: bool,
 }
 
 pub const GAME_W: u32 = 4;
@@ -282,7 +284,7 @@ fn serve(stream: TcpStream, state: Arc<Mutex<State>>, token: String, stop: Arc<A
     state.lock().unwrap().clients += 1;
     let mut line = String::new();
     loop {
-        if stop.load(Ordering::SeqCst) {
+        if stop.load(Ordering::SeqCst) || state.lock().unwrap().drop_connections {
             break;
         }
         match reader.read_line(&mut line) {

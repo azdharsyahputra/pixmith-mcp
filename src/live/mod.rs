@@ -7,6 +7,13 @@
 //! `documents.apply` as one labelled undo step. A shadow is kept while the app's revision of the document is the
 //! one the shadow was built from, so a selection, a floating paste or a free transform survives from one call to
 //! the next; as soon as the user (or anything else) changes the document, the next call fetches it again.
+//!
+//! Calls never overlap: every tool call, including the ones that create, open and close documents in the app, runs
+//! on the one engine thread (`engine.rs`), so the requests to the app are strictly one after another and parallel
+//! tool calls from a client queue up there.
+//!
+//! Once this server has been connected to the app, a call that would create or edit a document does not silently
+//! turn headless when the app is gone: it tries to reconnect once and otherwise fails (see [`Live::lost`]).
 
 mod client;
 mod discovery;
@@ -17,7 +24,7 @@ use client::{BUSY, Conn, NO_GAME, NO_METHOD, RpcError, STALE, UNKNOWN_DOC, UNSAV
 use crate::doc::Doc;
 use crate::engine::{DocEntry, Engine, R};
 use crate::paths::show;
-use crate::tools::docs::{NewArgs, OpenArgs, OpenFormat, Target, summary};
+use crate::tools::docs::{MAX_HEADLESS_DOCS, NewArgs, OpenArgs, OpenFormat, Target, summary};
 use crate::tools::{Out, ToolDef, parse};
 use base64::Engine as _;
 use pixmith_core::Sprite;
@@ -83,12 +90,24 @@ pub struct Live {
     disabled: bool,
     /// Why the last connection attempt failed.
     problem: Option<String>,
+    /// The server has been connected to an app at some point of this session.
+    was_connected: bool,
+    /// What broke the connection the last time it was lost (e.g. "Broken pipe").
+    lost_cause: Option<String>,
     shadows: HashMap<String, Shadow>,
 }
 
 impl Live {
     pub fn new(mode: Mode) -> Live {
-        Live { mode, conn: None, disabled: false, problem: None, shadows: HashMap::new() }
+        Live {
+            mode,
+            conn: None,
+            disabled: false,
+            problem: None,
+            was_connected: false,
+            lost_cause: None,
+            shadows: HashMap::new(),
+        }
     }
 
     pub fn is_connected(&self) -> bool {
@@ -126,6 +145,8 @@ impl Live {
             match Conn::connect(e) {
                 Ok(c) => {
                     self.conn = Some(c);
+                    self.was_connected = true;
+                    self.lost_cause = None;
                     self.shadows.clear();
                     return Ok(());
                 }
@@ -161,6 +182,29 @@ impl Live {
         self.shadows.clear();
     }
 
+    /// The server was connected to the app earlier in this session.
+    pub fn was_connected(&self) -> bool {
+        self.was_connected
+    }
+
+    /// After [`ensure`](Self::ensure) failed: the error for a call that would create or edit a document, when the
+    /// server had been connected to the app in this session (mode auto or on) and `app_disconnect` was not called.
+    /// Such a call must not silently go headless. `None`: working headless is expected (never connected, live off,
+    /// or disconnected on purpose).
+    pub fn lost(&self) -> Option<String> {
+        if !self.was_connected || self.mode == Mode::Off || self.disabled || self.conn.is_some() {
+            return None;
+        }
+        let why = self.problem.as_deref().unwrap_or("no Pixmith app is running");
+        let why = match &self.lost_cause {
+            Some(c) => format!("{c}; {why}"),
+            None => why.to_string(),
+        };
+        Some(format!(
+            "the Pixmith app was connected but is not reachable now ({why}); start it again, or pass target: \"headless\" (doc_new / doc_open) or a headless document id as `doc`, or call app_disconnect to work headless on purpose"
+        ))
+    }
+
     /// Why there is no connection, as a message for a tool error.
     pub fn not_connected(&self) -> String {
         match self.mode {
@@ -184,10 +228,11 @@ impl Live {
     fn rpc(&mut self, method: &str, params: Value) -> Result<Value, RpcError> {
         let Some(c) = self.conn.as_mut() else { return Err(RpcError::Io(self.not_connected())) };
         let r = c.request(method, params);
-        if matches!(r, Err(RpcError::Io(_))) {
+        if let Err(RpcError::Io(m)) = &r {
             self.conn = None;
             self.shadows.clear();
             self.problem = Some("the connection to the app was lost".into());
+            self.lost_cause = Some(m.clone());
         }
         r
     }
@@ -356,8 +401,11 @@ impl Live {
             }
             None => {
                 v["connected"] = json!(false);
-                v["reason"] = json!(self.not_connected());
+                let lost = self.lost();
+                v["reason"] = json!(lost.clone().unwrap_or_else(|| self.not_connected()));
                 v["note"] = json!(match self.mode {
+                    _ if lost.is_some() =>
+                        "The app was connected earlier in this session but is not reachable now: calls that create or edit documents fail instead of silently going headless. Start the app again (the next call reconnects), or call app_disconnect / pass target: \"headless\" to work headless on purpose.",
                     Mode::Off => "Live mode is off; tools edit headless documents (ids d1, d2, ...).",
                     _ =>
                         "Tools edit headless documents (ids d1, d2, ...). Open the Pixmith app and call app_connect to edit its documents live.",
@@ -412,6 +460,46 @@ pub struct Call {
 /// Runs a tool: on the headless documents, or on the app's when the call targets one.
 pub fn dispatch(e: &mut Engine, call: &Call, args: Value) -> R<Out> {
     let name = call.def.name;
+    // Closing all headless documents never involves the app.
+    if name == "doc_close" && args.get("all_headless").and_then(Value::as_bool) == Some(true) {
+        return (call.def.run)(e, args);
+    }
+    let mut out = dispatch_routed(e, call, args)?;
+    if matches!(name, "doc_new" | "doc_open") {
+        limit_headless(e, &mut out);
+    }
+    Ok(out)
+}
+
+/// Keeps the number of headless documents bounded: past [`MAX_HEADLESS_DOCS`] the oldest unmodified ones are closed
+/// (never the one just created) and the result says so.
+fn limit_headless(e: &mut Engine, out: &mut Out) {
+    let Some(newest) = out.value.get("doc").and_then(Value::as_str).filter(|d| !d.starts_with("app:")) else { return };
+    let newest = newest.to_string();
+    let closed = e.trim_headless(MAX_HEADLESS_DOCS, &newest);
+    let left = e.headless_count();
+    let note = if !closed.is_empty() {
+        format!(
+            "more than {MAX_HEADLESS_DOCS} headless documents were open, so the oldest unmodified ones were closed: {}. Close documents you are done with (doc_close; all_headless=true closes them all)",
+            closed.join(", ")
+        )
+    } else if left > MAX_HEADLESS_DOCS {
+        format!(
+            "{left} headless documents are open (limit {MAX_HEADLESS_DOCS}) and the rest have unsaved changes; save or close them (doc_close; all_headless=true with discard_changes=true closes them all)"
+        )
+    } else {
+        return;
+    };
+    if let Some(o) = out.value.as_object_mut() {
+        o.insert("note".into(), json!(note));
+        if !closed.is_empty() {
+            o.insert("closed_headless".into(), json!(closed));
+        }
+    }
+}
+
+fn dispatch_routed(e: &mut Engine, call: &Call, args: Value) -> R<Out> {
+    let name = call.def.name;
     let creates = matches!(name, "doc_new" | "doc_open");
     if !(call.takes_doc || creates || name == "doc_list") {
         return (call.def.run)(e, args);
@@ -428,8 +516,19 @@ pub fn dispatch(e: &mut Engine, call: &Call, args: Value) -> R<Out> {
         "doc_new" | "doc_open" => return create_document(e, call, args),
         _ => {}
     }
+    let implicit = args.get("doc").and_then(Value::as_str).is_none_or(|d| d.trim().is_empty());
     match route(e, &args)? {
-        None => (call.def.run)(e, args),
+        None => {
+            let mut out = (call.def.run)(e, args)?;
+            // Connected, but the app has no document to take this call: say that it went to a headless one.
+            if implicit
+                && e.live.is_connected()
+                && let Some(o) = out.value.as_object_mut()
+            {
+                o.entry("target").or_insert(json!("headless"));
+            }
+            Ok(out)
+        }
         Some(doc) => on_app(e, call, args, doc),
     }
 }
@@ -463,11 +562,18 @@ fn route(e: &mut Engine, args: &Value) -> R<Option<AppDoc>> {
         return Ok(None);
     }
     if !e.live.ensure() {
-        return if e.live.mode == Mode::On { Err(e.live.not_connected()) } else { Ok(None) };
+        return if e.live.mode == Mode::On {
+            Err(e.live.not_connected())
+        } else if let Some(lost) = e.live.lost() {
+            Err(lost)
+        } else {
+            Ok(None)
+        };
     }
     let (docs, active) = match e.live.list() {
         Ok(x) => x,
         Err(x) if e.live.mode == Mode::On => return Err(explain(&x, "the app")),
+        Err(x) if e.live.was_connected() => return Err(e.live.lost().unwrap_or_else(|| explain(&x, "the app"))),
         Err(_) => return Ok(None),
     };
     let pick = active.as_ref().and_then(|a| docs.iter().find(|d| &d.id == a)).or(match docs.as_slice() {
@@ -502,7 +608,8 @@ fn list_documents(e: &mut Engine, call: &Call, args: Value) -> R<Out> {
     if !connected {
         obj.insert(
             "app".into(),
-            json!({ "connected": false, "mode": e.live.mode.name(), "reason": e.live.not_connected() }),
+            json!({ "connected": false, "mode": e.live.mode.name(),
+                    "reason": e.live.lost().unwrap_or_else(|| e.live.not_connected()) }),
         );
         return Ok(out);
     }
@@ -534,15 +641,34 @@ fn create_document(e: &mut Engine, call: &Call, mut args: Value) -> R<Out> {
         Some("headless") => Some(Target::Headless),
         Some(other) => return Err(format!("target must be \"app\" or \"headless\", not {other:?}")),
     };
-    let connected = target != Some(Target::Headless) && e.live.ensure();
+    let mut connected = target != Some(Target::Headless) && e.live.ensure();
+    if connected && let Err(x) = e.live.list() {
+        // A connection that broke since the last call: `list` already reconnected once.
+        connected = false;
+        if target.is_none() && e.live.mode != Mode::On {
+            return Err(e.live.lost().unwrap_or_else(|| explain(&x, "the app")));
+        }
+    }
     if target == Some(Target::App) && !connected {
         return Err(e.live.not_connected());
     }
-    if target.is_none() && !connected && e.live.mode == Mode::On {
-        return Err(e.live.not_connected());
+    if target.is_none() && !connected {
+        if e.live.mode == Mode::On {
+            return Err(e.live.not_connected());
+        }
+        if let Some(lost) = e.live.lost() {
+            return Err(lost);
+        }
     }
     if !connected {
-        return (call.def.run)(e, args);
+        // Headless on purpose (or the app was never there): when an app was involved in this session, say so.
+        let mut out = (call.def.run)(e, args)?;
+        if (target == Some(Target::Headless) || e.live.was_connected())
+            && let Some(o) = out.value.as_object_mut()
+        {
+            o.insert("target".into(), json!("headless"));
+        }
+        return Ok(out);
     }
     if let Some(o) = args.as_object_mut() {
         o.remove("target");

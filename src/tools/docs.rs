@@ -53,7 +53,7 @@ pub fn tools() -> Vec<ToolDef> {
             Hints2::CLOSE,
             CloseArgs,
             doc_close,
-            "Close a document and free it. Refuses when it has unsaved changes unless discard_changes=true."
+            "Close a document and free it. Refuses when it has unsaved changes unless discard_changes=true. With all_headless=true it instead closes every headless document (ids d1, d2, ...; never the Pixmith app's tabs) at once: documents with unsaved changes are kept and listed unless discard_changes=true. Headless documents also pile up on their own: when more than 32 are open, doc_new / doc_open close the oldest unmodified ones and say so in the result `note`."
         ),
         tool!(
             "Documents",
@@ -349,9 +349,43 @@ pub struct CloseArgs {
     pub doc: Option<String>,
     /// Close even if there are unsaved changes (they are lost).
     pub discard_changes: Option<bool>,
+    /// Close every headless document (d1, d2, ...) instead of one; the app's documents are never touched. Documents
+    /// with unsaved changes stay open (and are listed in `kept_unsaved`) unless `discard_changes` is true. Not
+    /// combinable with `doc`.
+    pub all_headless: Option<bool>,
 }
 
+/// Most headless documents kept open before `doc_new` / `doc_open` close the oldest unmodified ones.
+pub const MAX_HEADLESS_DOCS: usize = 32;
+
 fn doc_close(e: &mut Engine, a: CloseArgs) -> R<Out> {
+    if a.all_headless.unwrap_or(false) {
+        if a.doc.is_some() {
+            return Err("give either `doc` or `all_headless`, not both".into());
+        }
+        let discard = a.discard_changes.unwrap_or(false);
+        let (mut closed, mut kept) = (Vec::new(), Vec::new());
+        e.docs.retain(|d| {
+            if d.id.starts_with("app:") {
+                return true;
+            }
+            if d.doc.is_dirty() && !discard {
+                kept.push(d.id.clone());
+                return true;
+            }
+            closed.push(d.id.clone());
+            false
+        });
+        let open: Vec<String> = e.docs.iter().map(|d| d.id.clone()).collect();
+        let mut v = json!({ "closed": closed, "kept_unsaved": kept, "open": open });
+        if !kept.is_empty() {
+            v["note"] = json!(format!(
+                "{} headless document(s) have unsaved changes and stay open; save them with doc_save or pass discard_changes=true",
+                kept.len()
+            ));
+        }
+        return Out::json(v);
+    }
     let d = e.doc(&a.doc)?;
     if d.doc.is_dirty() && !a.discard_changes.unwrap_or(false) {
         return Err(format!(

@@ -19,7 +19,7 @@ pub fn tools() -> Vec<ToolDef> {
             CHANGE,
             SliceArgs,
             slice,
-            "Slices: named rectangles exported with sprite sheets and used for UI 9-patches and pivots. Actions: list, add (name, bounds), set (any of name, bounds, center = the 9-patch middle rectangle relative to the slice, pivot = [x, y] relative to the slice; clear_center / clear_pivot remove them), remove. Bounds, center and pivot are keyed per frame: a value set at `frame` applies from there until the next key (default frame 0)."
+            "Slices: named rectangles exported with sprite sheets and used for UI 9-patches and pivots. Actions: list, add (name, bounds), set (any of name, bounds, center = the 9-patch middle rectangle relative to the slice, pivot = [x, y] relative to the slice; clear_center / clear_pivot remove them), remove (alias: delete). Bounds, center and pivot are keyed per frame: a value set at `frame` applies from there until the next key (default frame 0)."
         ),
         tool!(
             "Slices & user data",
@@ -76,6 +76,7 @@ pub enum SliceAction {
     List,
     Add,
     Set,
+    #[serde(alias = "delete")]
     Remove,
 }
 

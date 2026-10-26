@@ -148,13 +148,13 @@ clients impose (Cursor, VS Code, Windsurf) while every schema stays flat and exp
 
 | Group | Tools | Covers |
 | --- | --- | --- |
-| Documents | `doc_new`, `doc_open`, `doc_save`, `doc_close`, `doc_list`, `doc_info`, `doc_set_active` | New sprites (size, background, color mode, palette preset); open `.pxmt` / `.aseprite` / `.ase`; import PNG, animated GIF, grid sprite sheets and sheets with Aseprite JSON; save / save as / save a copy; full inspection (layer tree, frames and durations, cel occupancy, tags, palette, slices, tilesets, user data, selection, history) |
+| Documents | `doc_new`, `doc_open`, `doc_save`, `doc_close`, `doc_list`, `doc_info`, `doc_set_active` | New sprites (size, background, color mode, palette preset); open `.pxmt` / `.aseprite` / `.ase`; import PNG, animated GIF, grid sprite sheets and sheets with Aseprite JSON; save / save as / save a copy; full inspection (layer tree, frames and durations, cel occupancy, tags, palette, slices, tilesets, user data, selection, history); `doc_close` closes one document or, with `all_headless: true`, every headless one |
 | App (live mode) | `app_status`, `app_connect`, `app_disconnect`, `game_screenshot` | Is the Pixmith app connected, which documents it has open; switch between the app and headless editing at runtime; screenshot of the running Godot game (Live Link game view, needs Pixmith 0.5.1+) |
 | Viewing | `render`, `get_pixels`, `get_pixel` | PNG image results (auto scale, frames, single layer or group, region, background, onion skin); exact colors as a compact character grid with legend or as hex |
 | Drawing | `draw_pixels`, `draw_shape`, `draw_polygon`, `draw_curve`, `draw_stroke`, `fill`, `spray`, `gradient`, `draw_text`, `brush` | Batch pixels, line / rectangle / ellipse (filled or outline), polygons, Bezier curves, freehand strokes with pixel-perfect mode, flood fill (contiguous or global, tolerance, dither patterns), spray, linear / radial gradients with Bayer dither, the built-in pixel font; brush size and shape, ink modes (simple, alpha, lock alpha, behind, shading with a ramp), mirror symmetry, custom brushes |
 | Selection | `select`, `clipboard` | Rectangle, polygon / lasso, magic wand, select by color, all / none / invert, expand / contract / border, replace / add / subtract; delete, move and crop; copy / cut / paste (also a PNG file) as a floating selection, move, commit or cancel |
 | Transform | `transform`, `free_transform`, `sprite_size` | Flips, 90 / 180-degree turns, free rotation with RotSprite (per cel, all frames, all layers); a free-transform session (position, size, angle, skew, anchor); scale sprite; canvas size with anchor or offset |
-| Layers & frames | `layer`, `frame`, `cel`, `tag` | Add / group / duplicate / remove / reorder / into and out of groups / merge down / properties (name, visibility, opacity, 19 blend modes) / PNG as layer; frames add / duplicate / remove / move / durations; cels link / unlink / opacity / copy / paste / move / clear; tags with direction, repeat and color |
+| Layers & frames | `layer`, `frame`, `cel`, `tag` | Add / group / duplicate / remove / reorder / into and out of groups / merge down / properties (name, visibility, opacity, 19 blend modes) / PNG as a new layer or, with `replace: true`, as the new pixels of an existing layer in one undo step; frames add / duplicate / remove / move / durations; cels link / unlink / opacity / copy / paste / move / clear; tags with direction, repeat and color |
 | Color | `palette`, `color_mode` | Get, set, add, insert, remove, move, duplicate, replace, sort, ramps, presets (PICO-8, DB16/32, Endesga 32, Game Boy, NES, grays), palette from sprite, `.gpl` / `.hex` files; RGBA / grayscale / indexed with dithering |
 | Filters | `filter` | Replace color, invert, desaturate, HSL, brightness/contrast, color balance, curves, outline, drop shadow, remove isolated pixels, blur, sharpen; per cel / layer / frame, clipped to the selection or a region; previews as images |
 | Tilemaps | `tileset`, `tilemap`, `terrain`, `terrain_paint` | Tilesets (view as image, read and write tile pixels, add / duplicate / delete / rename); tilemap layers (create, convert from image, stamp with flips, read the grid); terrain auto-tiling: sides / blob / corners (dual grid) modes, several terrains with priorities, templates, masks, peers, symmetry, weights, terrain brush / rectangle / flood / overrides, rebuild, missing-tile report |
@@ -162,8 +162,8 @@ clients impose (Cursor, VS Code, Windsurf) while every schema stays flat and exp
 | Tweening | `tween` | Keys for x, y, rotation, scale, opacity; eases including Bezier; pivots; RotSprite and snapping options; copy / paste keys; bake into cels |
 | Export | `export`, `export_godot`, `export_godot_tileset` | PNG (frame, scale), GIF, APNG, PNG sequences, sprite sheets (horizontal / vertical / grid, padding, border, extrude, trim, Aseprite JSON) per tag or per layer; Godot 4 SpriteFrames `.tres` + atlas (+ `.tscn`, and Live Link: the running game updates after every edit), Godot 4 TileSet `.tres` with terrains and collisions; dry runs and previews |
 | History | `undo`, `redo`, `history`, `history_goto`, `transaction` | Every mutating call is one labeled undo step; jump anywhere in the history; group many calls into one step |
-| Scripting | `run_lua` | The Lua 5.4 scripting API of Pixmith (sandboxed, one undo step, errors roll back) for anything else |
-| Help | `help` | The usage guide, the Lua API reference, example scripts, palette presets, the tool list |
+| Scripting | `run_lua` | The Lua 5.4 scripting API of Pixmith (sandboxed, one undo step, errors roll back) for anything else; sources up to 16 MiB, `timeout_seconds` 1-120 (default 10) |
+| Help | `help` | The usage guide, the Lua API reference, example scripts, palette presets, the tool list, and a short how-to per tool group (`documents`, `layers`, `drawing`, `selection`, `transform`, `filters`, `tilemaps`, `slices`, `tween`, `export`, `history`, `live`) |
 
 The server also provides:
 
@@ -186,7 +186,18 @@ The server also provides:
 - Colors are `"#RRGGBB"` or `"#RRGGBBAA"` (also `#RGB`, `rgb()`, CSS basic names, `transparent`). Results always print
   `#rrggbbaa`.
 - Errors come back as tool results with `isError: true` and the core's message; a failed call changes nothing.
-  Unknown argument names are reported (with the valid ones), which catches typos early.
+  Unknown argument names and unknown actions are reported with the valid ones, which catches typos early.
+- A few common synonyms are accepted: `delete` for the `remove` action of `layer`, `frame`, `tag`, `slice`,
+  `palette` and `terrain` (and `clear` of `cel`: `remove` / `delete`), `delete_key` for `tween` `remove_key`,
+  `remove_tile` for `tileset` `delete_tile`, and `script` / `code` for the `source` argument of `run_lua`. The tool
+  schemas list the canonical names only.
+- Headless documents (ids `d1`, ...) stay until closed. `doc_close {"all_headless": true}` closes them all at once
+  (documents with unsaved changes are kept and listed unless `discard_changes` is true). Past 32 open headless
+  documents, `doc_new` / `doc_open` close the oldest unmodified ones (saved or never edited, never the new one) and say
+  so in the result's `note`.
+- `layer` with `action: "import_png"` adds the PNG as a new layer; with `replace: true` it puts the PNG into the
+  existing `layer` at `frame` instead (one undo step; the layer keeps name, order, opacity and blend mode; `x` / `y`
+  shift it, `name` renames the layer).
 - Large results are bounded: `get_pixels` returns at most 16384 pixels per call (4096 as hex), `render` at most 16
   images of at most 4096 px, `history` is paginated, `doc_info` truncates very long frame lists.
 
@@ -194,8 +205,10 @@ The server also provides:
 
 Start Pixmith 0.5.0 or later (macOS app, or the Windows / Linux / macOS desktop app) and use the tools as usual: the agent's
 edits show up in the open window while it works, each call is one undo step named **AI: \<tool\>** (for example
-`AI: draw_shape rectangle`) that you can take back with Cmd/Ctrl+Z, and the document is marked as edited. Close the
-app and the very same tools keep working headless on files, as before. No configuration is needed.
+`AI: draw_shape rectangle`) that you can take back with Cmd/Ctrl+Z, and the document is marked as edited. Without an app
+(never started, or after `app_disconnect`) the very same tools work headless on files, as before; an app that
+disappears in the middle of a session is reported as an error instead of being silently replaced by headless editing
+(see "No silent fallback" below). No configuration is needed.
 
 ```
 agent --MCP--> pixmith-mcp --127.0.0.1, token--> Pixmith app (your open documents)
@@ -215,7 +228,18 @@ times); while a dialog is open the app asks it to wait and it retries for a few 
   (`doc_save` saves with the app, so its dirty marker is cleared; `copy: true` writes a copy without touching the tab).
 - **Layer and frame.** Tools without `layer` / `frame` use the app's current layer and frame. A tool aimed at another
   layer or frame, or one that adds a layer, moves the app's current layer / frame there, so you see where it works.
-- **Modes.** `--live auto` (default) uses the app when one is running and falls back to headless otherwise;
+- **No silent fallback.** Once this server has been connected to the app in a session, a call that creates or edits a
+  document never quietly continues headless when the app becomes unreachable (it quit, crashed, or dropped the
+  socket): the server reconnects once, and if that fails the call returns an error ("the Pixmith app was connected but
+  is not reachable now (...); start it again, or pass `target: "headless"` / call `app_disconnect` to work headless on
+  purpose"). Explicit headless work keeps working: `target: "headless"` on `doc_new` / `doc_open`, a headless id (`d1`)
+  as `doc`, or `app_disconnect`. Results of headless creations say `"target": "headless"` once an app was involved,
+  and so do calls without `doc` that land on a headless document while the app is connected. A server that was never
+  connected behaves as before (headless, no extra fields).
+- **One call at a time.** Every tool call runs on the single engine thread, so parallel tool calls from a client
+  (several `doc_new` at once, say) queue up and their requests to the app never interleave.
+- **Modes.** `--live auto` (default) uses the app when one is running and falls back to headless otherwise (until it
+  has been connected once, see above);
   `--live on` requires the app (tools fail with a clear message when none is running; `target: "headless"` still
   works); `--live off` never talks to an app. The `PIXMITH_LIVE` environment variable (`auto|on|off`) is the same
   switch; the flag wins. At runtime, `app_status` shows the state, `app_disconnect` makes the server work headless
@@ -258,6 +282,9 @@ game_screenshot  {"scale": 2}                                           // -> im
   discovery file. While an agent is connected, the app shows an "AI connected" chip in the title row; its menu lists
   the client and has **Disconnect**.
 - The app was started after the agent: nothing to do in `auto` mode, the next call finds it; or call `app_connect`.
+- "the Pixmith app was connected but is not reachable now": the app quit or dropped the connection mid-session. Start
+  it again (the next call reconnects), or deliberately work headless with `app_disconnect` or `target: "headless"`.
+  `app_status` shows the reason; before this check, such calls silently created headless documents.
 - "refused the connection" / "protocol": the app and `pixmith-mcp` are from incompatible versions; update the older one.
 - Running the server in a different account, container or sandbox than the app: the discovery folder and the loopback
   port must be reachable; set `PIXMITH_SUPPORT_DIR` to the app's folder if it is relocated.
@@ -310,7 +337,8 @@ follow.
   tool runs; the tool annotations (`readOnlyHint`, `destructiveHint`, `idempotentHint`) let them tell harmless calls
   from writes.
 - Lua scripts run in Pixmith's sandbox: no `io`, `os`, `require` or bytecode, with instruction, time and memory
-  limits.
+  limits (10 s by default, `timeout_seconds` raises it up to 120 s and the instruction budget with it; source up to
+  16 MiB).
 - `--http` binds where you tell it (use `127.0.0.1`), accepts only local `Host` headers and local browser origins,
   and has no authentication. Prefer stdio.
 - The server never touches Pixmith's own settings, autosave or script folders. In live mode it only reads the

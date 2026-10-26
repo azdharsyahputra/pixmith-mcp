@@ -288,6 +288,28 @@ impl Engine {
         Some(d)
     }
 
+    /// Headless documents kept inside the server (not the shadows of app documents).
+    pub fn headless_count(&self) -> usize {
+        self.docs.iter().filter(|d| !d.id.starts_with("app:")).count()
+    }
+
+    /// Closes the oldest unmodified headless documents (saved or never edited, no open transaction) until at most
+    /// `max` are left, never `keep`. Returns the closed ids, oldest first.
+    pub fn trim_headless(&mut self, max: usize, keep: &str) -> Vec<String> {
+        let mut excess = self.headless_count().saturating_sub(max);
+        let mut closed = Vec::new();
+        self.docs.retain(|d| {
+            let closable =
+                excess > 0 && d.id != keep && !d.id.starts_with("app:") && !d.doc.is_dirty() && d.txns.is_empty();
+            if closable {
+                excess -= 1;
+                closed.push(d.id.clone());
+            }
+            !closable
+        });
+        closed
+    }
+
     /// Registers a document and returns its id.
     pub fn add(&mut self, doc: Doc, name: String, path: Option<PathBuf>, source: Option<PathBuf>) -> String {
         let id = format!("d{}", self.next_id);

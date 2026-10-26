@@ -25,7 +25,7 @@ pub fn tools() -> Vec<ToolDef> {
             CHANGE,
             TilesetArgs,
             tileset,
-            "Work with tilesets (tile index 0 is always the empty tile). Actions: list, image (see every tile as one picture, labeled grid in index order), get_tile (pixels of one tile in the legend format), set_tile (replace a tile's pixels from `rows`+`legend` or a PNG `path`), add_tile (append an empty tile, or one with pixels), duplicate_tile, delete_tile (cells using it become empty, higher indices shift down), rename, set_base_index (the number shown for tile 1). Drawing on a tilemap layer also edits the tiles it shows."
+            "Work with tilesets (tile index 0 is always the empty tile). Actions: list, image (see every tile as one picture, labeled grid in index order), get_tile (pixels of one tile in the legend format), set_tile (replace a tile's pixels from `rows`+`legend` or a PNG `path`), add_tile (append an empty tile, or one with pixels), duplicate_tile, delete_tile (alias: remove_tile; cells using it become empty, higher indices shift down), rename, set_base_index (the number shown for tile 1). Drawing on a tilemap layer also edits the tiles it shows."
         ),
         tool!(
             "Tilemaps",
@@ -43,7 +43,7 @@ pub fn tools() -> Vec<ToolDef> {
             CHANGE,
             TerrainArgs,
             terrain,
-            "Set up terrain auto-tiling on a tilemap layer (Godot-compatible peering). Modes: sides (16 tiles, N E S W), blob (47 tiles, sides + corners), corners (dual grid, 4 corners). Actions: create (first terrain + mode), set_mode, add / remove / edit / move (terrain priority), list, generate_template (append a labeled template tileset for the mode; reduced = only flip/rotation representatives), assign_masks (give tiles 1.. the template's masks in order), set_tile (a tile's mask / terrain / peers / symmetry / weight), get_tile, set_options (edge_same, seed), rebuild (recompute every cell), clear_overrides, missing (cells that had no matching tile, read-only report). Paint with terrain_paint."
+            "Set up terrain auto-tiling on a tilemap layer (Godot-compatible peering). Modes: sides (16 tiles, N E S W), blob (47 tiles, sides + corners), corners (dual grid, 4 corners). Actions: create (first terrain + mode), set_mode, add / remove (alias: delete) / edit / move (terrain priority), list, generate_template (append a labeled template tileset for the mode; reduced = only flip/rotation representatives), assign_masks (give tiles 1.. the template's masks in order), set_tile (a tile's mask / terrain / peers / symmetry / weight), get_tile, set_options (edge_same, seed), rebuild (recompute every cell), clear_overrides, missing (cells that had no matching tile, read-only report). Paint with terrain_paint."
         ),
         tool!(
             "Tilemaps",
@@ -70,6 +70,7 @@ pub enum TilesetAction {
     SetTile,
     AddTile,
     DuplicateTile,
+    #[serde(alias = "remove_tile")]
     DeleteTile,
     Rename,
     SetBaseIndex,
@@ -486,6 +487,7 @@ pub enum TerrainAction {
     Create,
     SetMode,
     Add,
+    #[serde(alias = "delete")]
     Remove,
     Edit,
     Move,
