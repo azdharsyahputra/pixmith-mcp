@@ -1017,3 +1017,39 @@ fn tween_parent_links_are_kept_in_the_apps_document() {
     assert_eq!(parent, Some(0));
     assert_eq!(mock.undo_labels("doc-1").last().unwrap(), "AI: tween set_parent");
 }
+
+#[test]
+fn frame_duplicate_with_count_and_link_is_one_request_and_one_undo_step() {
+    let (mut c, mock) = start();
+    c.ok("draw_pixels", json!({ "points": [[1, 1]], "color": "#ff0000" }));
+    mock.clear_calls();
+    let r = c.ok("frame", json!({ "action": "duplicate", "frame": 0, "count": 40, "link": true }));
+    assert_eq!(r["frames"], 41, "{r}");
+    assert_eq!(r["copies"], 40);
+    assert_eq!(r["linked_cels"], 40, "{r}");
+    assert_eq!(r["new_frames"], json!([1, 40]));
+    assert_eq!(mock.applies(), 1, "{:?}", mock.calls());
+    assert_eq!(mock.count("documents.apply"), 1);
+    assert_eq!(mock.undo_labels("doc-1").last().unwrap(), "AI: frame duplicate");
+    // The app really holds linked cels, and every copy shows the source.
+    let cel = c.ok("cel", json!({ "action": "info", "layer": 0, "frame": 40 }));
+    assert_eq!(cel["linked"], true, "{cel}");
+    assert_eq!(mock.with(|s| s.docs[0].editor.sprite.link_siblings(0, 0).len()), 40);
+}
+
+#[test]
+fn a_document_over_the_message_limit_is_refused_before_it_is_sent() {
+    let (mut c, mock) = start_with(&[], &[("PIXMITH_LIVE_MAX_MESSAGE", "4000")]);
+    mock.add_blank(32, 32, "big.pxmt");
+    c.ok("draw_pixels", json!({ "points": [[1, 1], [2, 2]], "color": "#ff0000" }));
+    let applies = mock.applies();
+    let e = c.err("frame", json!({ "action": "duplicate", "count": 100 }));
+    assert!(e.contains("step failed") && e.contains("over the") && e.contains("Nothing was sent"), "{e}");
+    assert!(e.contains("link: true"), "{e}");
+    assert_eq!(mock.applies(), applies, "the app saw nothing");
+    // The connection is fine: no reconnect, and the linked version of the same edit fits.
+    let r = c.ok("frame", json!({ "action": "duplicate", "count": 20, "link": true }));
+    assert_eq!(r["linked_cels"], 20, "{r}");
+    assert_eq!(mock.with(|s| s.hellos), 1);
+    assert_eq!(mock.applies(), applies + 1);
+}

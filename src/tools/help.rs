@@ -96,6 +96,10 @@ const DOCUMENTS: &str = r##"# Documents (doc_new, doc_open, doc_save, doc_close,
   headless document (d1, d2, ...) at once and keeps the unsaved ones unless discard_changes=true.
 - Headless documents are limited to 32: when doc_new / doc_open would pass that, the oldest unmodified (saved or never
   edited) ones are closed and the result `note` lists them. Close what you are done with.
+- Memory and size: the real limit is roughly frames x layers x canvas size (width x height x 4 bytes per cel) for cels that
+  are not linked. 300 frames x 4 layers x 512x512 is about 1.2 GB. Link cels (cel link, frame duplicate with link: true)
+  or use a smaller canvas to avoid it. In live mode the whole document travels to the app in one message of at most
+  64 MiB; a larger one is refused before sending (nothing changes in the app) and the error says so.
 - doc_info {sections?} shows layers, frames, cels, tags, palette, slices, tilesets, selection, history; doc_set_active
   {layer?, frame?} sets the defaults tools use without `layer` / `frame`.
 "##;
@@ -107,7 +111,10 @@ const LAYERS: &str = r##"# Layers, frames, cels and tags (layer, frame, cel, tag
   a layer in one undo step.
 - Replace the pixels of an existing layer from a PNG in ONE undo step: layer {action: "import_png", layer, frame, path,
   replace: true, x?, y?}. Name, order, opacity and blend mode stay; without replace a new layer is added.
-- frame {action}: add, duplicate, remove (alias delete), move, set_duration {duration_ms, frame | frames | all}.
+- frame {action}: add, duplicate {count?, link?}, remove (alias delete), move, set_duration {duration_ms, frame | frames | all}.
+  frame duplicate {frame, count: N} makes N copies in ONE call, one undo step and (live mode) one request to the app; add
+  link: true to make the copies share the source frame's cels instead of copying pixels (memory stays small; editing one
+  copy edits all until cel unlink). Never loop hundreds of single calls: in live mode each call sends the whole document.
 - cel {action}: link, unlink, set_opacity, clear (aliases remove, delete), copy, paste, move; cels are one layer in one frame.
   copy / paste / move return {copied|pasted|moved: {layers: [a, b], frames: [a, b], cels: n}} and a summary line.
 - tag {action}: add {name, from, to, direction?, repeat?, color?}, update, remove (alias delete).

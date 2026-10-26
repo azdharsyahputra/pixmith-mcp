@@ -34,7 +34,7 @@ pub fn tools() -> Vec<ToolDef> {
             CHANGE,
             FrameArgs,
             frame,
-            "Frame menu and timeline: edit animation frames (0-based). Actions: add (`count` empty frames after `frame`, default after the active one), duplicate (copy `frame` right after itself, `count` times), remove (alias: delete), move (frame `frame` to position `to`), set_duration (milliseconds for `frame`, `frames` list, or every frame with all=true). Tags are adjusted automatically."
+            "Frame menu and timeline: edit animation frames (0-based). Actions: add (`count` empty frames after `frame`, default after the active one), duplicate (copy `frame` right after itself, `count` times in one undo step and, in live mode, one request to the app; link=true makes the copies share the source's cels instead of copying pixels, so many copies cost almost no memory; unlinked copies cost frames x layers x canvas size), remove (alias: delete), move (frame `frame` to position `to`), set_duration (milliseconds for `frame`, `frames` list, or every frame with all=true). Tags are adjusted automatically."
         ),
         tool!(
             "Layers & frames",
@@ -469,8 +469,12 @@ pub struct FrameArgs {
     pub doc: Option<String>,
     /// The frame to act on (default: active). add inserts after it.
     pub frame: Option<u32>,
-    /// add/duplicate: how many (default 1, max 1024).
+    /// add/duplicate: how many (default 1, max 1024), all in one undo step and (in live mode) one request to the app.
     pub count: Option<u32>,
+    /// duplicate: share the source frame's cels with the copies (linked cels, like `cel link`) instead of copying
+    /// the pixels, so N copies cost almost no memory and the document stays small. Editing one copy edits them all
+    /// until `cel unlink`. Default false.
+    pub link: Option<bool>,
     /// move: destination index.
     pub to: Option<u32>,
     /// set_duration: milliseconds (1-65535).
@@ -486,19 +490,85 @@ fn frame(e: &mut Engine, a: FrameArgs) -> R<Out> {
     let raw = d.doc.raw();
     let act = super::act(&a.action);
     let f = d.frame(a.frame)?;
+    let mut extra = json!({});
     match a.action {
         FrameAction::Add | FrameAction::Duplicate => {
             let n = a.count.unwrap_or(1).clamp(1, 1024);
             let dup = a.action == FrameAction::Duplicate;
-            let last = d.edit(if dup { "Duplicate Frame" } else { "New Frame" }, Undo::Step, |_| {
+            let link = a.link.unwrap_or(false);
+            if link && !dup {
+                return Err("link only applies to frame duplicate (new empty frames have no cels to link)".into());
+            }
+            let before = d.doc.frame_count();
+            let verb = if dup { "duplicate" } else { "add" };
+            let (last, linked_cels) = d.edit(if dup { "Duplicate Frame" } else { "New Frame" }, Undo::Step, |e| {
                 let mut at = f;
-                for _ in 0..n {
-                    // A duplicate copies the frame before it, so repeated copies all show the original.
-                    at = unsafe { core::pixmith_add_frame(raw, at, dup) };
+                for i in 0..n {
+                    // A duplicate copies the frame before it, so repeated copies all show the original. Linked
+                    // copies start empty and get the source's cels below.
+                    at = unsafe { core::pixmith_add_frame(raw, at, dup && !link) };
+                    let now = e.doc.frame_count();
+                    if now != before + i + 1 {
+                        return Err(fail(format!(
+                            "frame {verb} stopped at copy {} of {n}: the document has {now} frames, expected {} (the core refused, e.g. out of memory). Everything this call did was rolled back: the document is unchanged, still {before} frames",
+                            i + 1,
+                            before + i + 1
+                        )));
+                    }
                 }
-                Ok(at)
+                let mut linked = 0u32;
+                if link {
+                    for l in 0..e.doc.sprite().layers.len() {
+                        if e.doc.sprite().cels[f as usize][l].is_none() {
+                            continue;
+                        }
+                        if !unsafe { lf::pixmith_cel_link(raw, l as u32, f, f + n) } {
+                            return Err(fail(format!(
+                                "frame duplicate with link: could not link layer {l} of frame {f} to its {n} copies (frames {}..={}). Everything this call did was rolled back: the document is unchanged",
+                                f + 1,
+                                f + n
+                            )));
+                        }
+                        // Verify instead of trusting the call: the copies must really share the source's image.
+                        let sibs = e.doc.sprite().link_siblings(l, f as usize);
+                        let got = (f + 1..=f + n).filter(|c| sibs.binary_search(&(*c as usize)).is_ok()).count() as u32;
+                        if got != n {
+                            return Err(fail(format!(
+                                "frame duplicate with link: only {got} of {n} copies of layer {l} ended up sharing the source cel (is it a tilemap layer?). Everything this call did was rolled back: the document is unchanged"
+                            )));
+                        }
+                        linked += got;
+                    }
+                }
+                Ok((at, linked))
             })?;
             d.frame = if dup { f + 1 } else { last + 1 - n };
+            extra = json!({
+                "action": verb, "source_frame": f, "copies": n, "new_frames": [f + 1, last],
+                "link": link,
+            });
+            if link {
+                extra["linked_cels"] = json!(linked_cels);
+                if linked_cels == 0 {
+                    extra["note"] = json!(format!("frame {f} has no cels to link; the copies are empty frames"));
+                }
+            } else if dup {
+                let frames = u64::from(d.doc.frame_count());
+                let mb = (frames
+                    * u64::from(d.doc.layer_count())
+                    * u64::from(d.doc.width())
+                    * u64::from(d.doc.height())
+                    * 4)
+                    >> 20;
+                if mb >= 256 {
+                    extra["note"] = json!(format!(
+                        "unlinked cels cost frames x layers x canvas size: up to about {mb} MiB for this document ({frames} frames x {} layers x {}x{}). frame duplicate with link: true shares the cels instead; a smaller canvas also helps",
+                        d.doc.layer_count(),
+                        d.doc.width(),
+                        d.doc.height()
+                    ));
+                }
+            }
         }
         FrameAction::Remove => {
             d.edit("Delete Frame", Undo::Step, |_| {
@@ -537,9 +607,12 @@ fn frame(e: &mut Engine, a: FrameArgs) -> R<Out> {
     }
     let n = d.doc.frame_count();
     let durations: Vec<u16> = (0..n.min(512)).map(|i| unsafe { core::pixmith_frame_duration(raw, i) }).collect();
-    Out::json(
-        json!({ "doc": d.id, "frames": n, "active_frame": d.frame, "durations_ms": durations, "tags": tags_json(d) }),
-    )
+    let mut v =
+        json!({ "doc": d.id, "frames": n, "active_frame": d.frame, "durations_ms": durations, "tags": tags_json(d) });
+    if let (Some(o), Some(x)) = (v.as_object_mut(), extra.as_object()) {
+        o.extend(x.clone());
+    }
+    Out::json(v)
 }
 
 #[derive(Deserialize, JsonSchema, Clone, Copy, PartialEq, Eq, Debug)]
@@ -619,6 +692,9 @@ fn cel(e: &mut Engine, a: CelArgs) -> R<Out> {
     let (l0, l1) = (l.min(l1), l.max(l1));
     let (f0, f1b) = (f.min(f1), f.max(f1));
     let ok = |b: bool, what: &str| if b { Ok(()) } else { Err(fail(what.to_string())) };
+    // The cel the result describes (`cel link` describes the source cel, not the active frame).
+    let mut report_frame = f;
+    let mut links_made: Option<u32> = None;
     match a.action {
         CelAction::Link => {
             let from = d.frame(Some(a.from_frame.unwrap_or(f)))?;
@@ -630,9 +706,22 @@ fn cel(e: &mut Engine, a: CelArgs) -> R<Out> {
             if unsafe { lf::pixmith_cel_opacity(raw, l, from) } < 0 {
                 return Err(format!("frame {from} has no image on layer {l} to link (see doc_info cels)"));
             }
-            d.edit("Link Cels", Undo::Step, |_| {
-                ok(unsafe { lf::pixmith_cel_link(raw, l, from, to) }, "could not link the cels")
+            // The result is checked, not trusted: the cels in from+1..=to must now share the image of `from`.
+            let wanted = to - from;
+            let made = d.edit("Link Cels", Undo::Step, |e| {
+                ok(unsafe { lf::pixmith_cel_link(raw, l, from, to) }, "could not link the cels")?;
+                let sibs = e.doc.sprite().link_siblings(l as usize, from as usize);
+                let made = (from + 1..=to).filter(|c| sibs.binary_search(&(*c as usize)).is_ok()).count() as u32;
+                if made != wanted {
+                    return Err(fail(format!(
+                        "cel link linked {made} of {wanted} cels on layer {l} (frames {}..={to} to frame {from}); the layer type or the core did not take the link. Nothing was changed",
+                        from + 1
+                    )));
+                }
+                Ok(made)
             })?;
+            report_frame = from;
+            links_made = Some(made);
         }
         CelAction::Unlink => d.edit("Unlink Cel", Undo::Step, |_| {
             ok(unsafe { lf::pixmith_cel_unlink(raw, l, f) }, "the cel is not linked")
@@ -685,6 +774,7 @@ fn cel(e: &mut Engine, a: CelArgs) -> R<Out> {
         }
         CelAction::Info => {}
     }
+    let f = report_frame;
     let op = unsafe { lf::pixmith_cel_opacity(raw, l, f) };
     let mut v = json!({
         "doc": d.id, "layer": l, "frame": f,
@@ -692,6 +782,9 @@ fn cel(e: &mut Engine, a: CelArgs) -> R<Out> {
         "linked": unsafe { lf::pixmith_cel_is_linked(raw, l, f) },
         "user_data": super::docs::user_data(d, 2, f, l),
     });
+    if let Some(n) = links_made {
+        v["links_made"] = json!(n);
+    }
     if let Some(s) = summary {
         v["summary"] = json!(s);
         if let Some((key, (l0, f0), (layers, frames, with_image))) = blk {

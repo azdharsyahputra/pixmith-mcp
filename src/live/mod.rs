@@ -19,7 +19,7 @@ mod client;
 mod discovery;
 
 pub use client::AppDoc;
-use client::{BUSY, Conn, INVALID_PARAMS, NO_GAME, NO_METHOD, RpcError, STALE, UNKNOWN_DOC, UNSAVED};
+use client::{BUSY, Conn, INVALID_PARAMS, NO_GAME, NO_METHOD, RpcError, STALE, TOO_LARGE, UNKNOWN_DOC, UNSAVED};
 
 use crate::doc::Doc;
 use crate::engine::{DocEntry, Engine, R};
@@ -239,7 +239,9 @@ impl Live {
 
     // MARK: Requests
 
-    fn rpc(&mut self, method: &str, params: Value) -> Result<Value, RpcError> {
+    /// One request; the parameters are only borrowed (a big `documents.apply` is tens of MiB of text: it is
+    /// serialized once and never copied for a retry).
+    fn rpc_ref(&mut self, method: &str, params: &Value) -> Result<Value, RpcError> {
         let Some(c) = self.conn.as_mut() else { return Err(RpcError::Io(self.not_connected())) };
         let r = c.request(method, params);
         if let Err(RpcError::Io(m)) = &r {
@@ -253,8 +255,8 @@ impl Live {
 
     /// For requests that change nothing: after a lost connection, reconnects once and asks again.
     fn rpc_read(&mut self, method: &str, params: Value) -> Result<Value, RpcError> {
-        match self.rpc(method, params.clone()) {
-            Err(RpcError::Io(_)) if self.ensure() => self.rpc(method, params),
+        match self.rpc_ref(method, &params) {
+            Err(RpcError::Io(_)) if self.ensure() => self.rpc_ref(method, &params),
             r => r,
         }
     }
@@ -263,7 +265,7 @@ impl Live {
     fn rpc_busy(&mut self, method: &str, params: Value) -> Result<Value, RpcError> {
         let mut delays = BUSY_DELAYS_MS.iter();
         loop {
-            match self.rpc(method, params.clone()) {
+            match self.rpc_ref(method, &params) {
                 Err(RpcError::Rpc { code: BUSY, .. }) if let Some(ms) = delays.next() => {
                     std::thread::sleep(Duration::from_millis(*ms));
                 }
@@ -458,6 +460,9 @@ fn explain(err: &RpcError, doc: &str) -> String {
             format!("{doc} is not open in the Pixmith app (any more); see doc_list")
         }
         RpcError::Rpc { code: BUSY, .. } => "the Pixmith app is busy (a dialog is open or a stroke is in progress); nothing was changed, try again in a moment".into(),
+        RpcError::Rpc { code: TOO_LARGE, message } => format!(
+            "{message}; nothing was sent, so nothing was created or changed in the app. Make the document smaller (link cels instead of copying them, a smaller canvas, fewer frames or layers)"
+        ),
         RpcError::Rpc { message, .. } => message.clone(),
         RpcError::Io(m) => format!("lost connection to the Pixmith app ({m}); reconnect with app_connect once the app is running again"),
     }
@@ -917,9 +922,19 @@ fn run_on_shadow(e: &mut Engine, call: &Call, args: Value, mut doc: AppDoc) -> R
                     .find(|d| d.id == doc.id)
                     .ok_or_else(|| format!("{tool_id} is not open in the Pixmith app (any more); see doc_list"))?;
             }
+            Err(RpcError::Rpc { code: TOO_LARGE, message }) => {
+                return Err(format!(
+                    "step failed: sending the result of `{label}` to {tool_id}: {message}. Nothing was sent or changed: {tool_id} in the app is exactly as it was and this server dropped its edited copy, so no partial result was left. The app takes a whole document in one message, and a document's size grows with frames x layers x canvas size for cels that are not linked. Make it smaller: link cels (cel link, or frame duplicate with link: true) instead of copying them, use a smaller canvas, or keep fewer frames or layers in this document"
+                ));
+            }
+            Err(RpcError::Io(m)) if client::sent_nothing(&m) => {
+                return Err(format!(
+                    "step failed: sending the result of `{label}` to {tool_id} ({m}). The app applies a document only after it has read the whole message, so nothing was applied and nothing partial was left in the app; this server dropped its edited copy. Reconnect with app_connect (the next call also reconnects by itself) and repeat the call. If it keeps failing on a large document, make the document smaller: link cels (cel link, or frame duplicate with link: true), use a smaller canvas, or keep fewer frames or layers"
+                ));
+            }
             Err(RpcError::Io(m)) => {
                 return Err(format!(
-                    "lost connection to the Pixmith app ({m}); the edit may or may not have reached the app, check with doc_info after reconnecting with app_connect. Nothing was applied to a headless copy"
+                    "step failed: waiting for the app to apply `{label}` to {tool_id} ({m}). The app may or may not have applied it: if it did, it is one undo step \"AI: {label}\" and the document is complete (never half-edited); check with doc_info after reconnecting with app_connect. Nothing was applied to a headless copy"
                 ));
             }
             Err(other) => return Err(explain(&other, &tool_id)),

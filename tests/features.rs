@@ -665,3 +665,49 @@ fn files_export_and_godot() {
     let tres = std::fs::read_to_string(c.path("game/art/rock.tres")).unwrap();
     assert!(tres.contains("TileSet") && tres.contains("terrain_set_0"), "{r}\n{tres}");
 }
+
+#[test]
+fn frame_duplicate_links_copies_and_cel_link_reports_real_links() {
+    let mut c = Client::start(&[]);
+    c.ok("doc_new", json!({ "width": 8, "height": 8 }));
+    c.ok("draw_pixels", json!({ "points": [[1, 1]], "color": "#ff0000" }));
+    let base = undo_steps(&mut c);
+    let r = c.ok("frame", json!({ "action": "duplicate", "count": 5, "link": true }));
+    assert_eq!(r["frames"], 6, "{r}");
+    assert_eq!(r["linked_cels"], 5, "{r}");
+    assert_eq!(undo_steps(&mut c), base + 1, "one call, one undo step");
+    assert_eq!(c.ok("cel", json!({ "action": "info", "frame": 5 }))["linked"], true);
+    // Copies without link are independent.
+    let r = c.ok("frame", json!({ "action": "duplicate", "frame": 0, "count": 2 }));
+    assert_eq!(r["link"], false);
+    assert!(r.get("linked_cels").is_none(), "{r}");
+    let e = c.err("frame", json!({ "action": "add", "link": true }));
+    assert!(e.contains("link only applies"), "{e}");
+    // cel link reports what it made.
+    c.ok("frame", json!({ "action": "add", "frame": 7, "count": 3 }));
+    c.ok("layer", json!({ "action": "add" }));
+    c.ok("draw_pixels", json!({ "layer": 1, "frame": 8, "points": [[2, 2]], "color": "#00ff00" }));
+    let r = c.ok("cel", json!({ "action": "link", "layer": 1, "from_frame": 8, "to_frame": 10 }));
+    assert_eq!(r["links_made"], 2, "{r}");
+    assert_eq!(r["frame"], 8);
+    assert_eq!(r["linked"], true);
+}
+
+#[test]
+fn export_png_lists_only_what_it_wrote() {
+    let mut c = Client::start(&[]);
+    c.ok("doc_new", json!({ "width": 8, "height": 8, "name": "hero" }));
+    c.ok("draw_pixels", json!({ "points": [[1, 1]], "color": "#ff0000" }));
+    c.ok("doc_save", json!({ "path": "out/hero.pxmt" }));
+    let r = c.ok("export", json!({ "format": "png", "path": "out/hero.png" }));
+    assert_eq!(r["files_written"], 1, "{r}");
+    let files = r["files"].as_array().unwrap();
+    assert_eq!(files.len(), 1, "{r}");
+    assert!(files[0].as_str().unwrap().ends_with("hero.png"), "{r}");
+    // A sequence: the count equals the list, and the document next to it is not in it.
+    c.ok("frame", json!({ "action": "duplicate", "count": 2 }));
+    let r = c.ok("export", json!({ "format": "png_sequence", "path": "out/hero" }));
+    assert_eq!(r["files_written"], 3, "{r}");
+    assert_eq!(r["files"].as_array().unwrap().len(), 3, "{r}");
+    assert!(!r.to_string().contains(".pxmt"), "{r}");
+}

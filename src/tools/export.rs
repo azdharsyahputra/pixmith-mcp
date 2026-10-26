@@ -122,21 +122,44 @@ pub struct ExportArgs {
     pub dry_run: Option<bool>,
 }
 
-/// Files in `base`'s directory whose names start with its stem, written since `since`.
-fn written_files(base: &Path, since: SystemTime) -> Vec<String> {
+/// What was in a folder before an export: `(modified, length)` by file name.
+type Listing = std::collections::HashMap<std::ffi::OsString, (Option<SystemTime>, u64)>;
+
+fn listing(dir: &Path) -> Listing {
+    std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let m = e.metadata().ok()?;
+            Some((e.file_name(), (m.modified().ok(), m.len())))
+        })
+        .collect()
+}
+
+/// The files an export wrote: the ones in `base`'s folder that start with its stem, have one of `exts` as
+/// extension and are new or were rewritten since `before` was taken. A document saved next to the export
+/// (`hero.pxmt` beside `hero.png`) or an older file with the same stem is not one of them.
+fn written_files(base: &Path, before: &Listing, since: SystemTime, exts: &[&str], stem_only: bool) -> Vec<String> {
     let (Some(dir), Some(stem)) = (base.parent(), base.file_stem().or(base.file_name())) else { return vec![] };
     let stem = stem.to_string_lossy().into_owned();
     let mut out: Vec<String> = std::fs::read_dir(dir)
         .into_iter()
         .flatten()
         .flatten()
-        .filter(|e| e.file_name().to_string_lossy().starts_with(&stem))
-        .filter(|e| e.metadata().and_then(|m| m.modified()).is_ok_and(|t| t >= since))
+        .filter(|e| !stem_only || e.file_name().to_string_lossy().starts_with(&stem))
+        .filter(|e| {
+            let n = e.file_name().to_string_lossy().to_ascii_lowercase();
+            exts.iter().any(|x| n.ends_with(&format!(".{x}"))) && !n.ends_with(".pixmith-tmp")
+        })
+        .filter(|e| {
+            let Ok(m) = e.metadata() else { return false };
+            let now = (m.modified().ok(), m.len());
+            before.get(&e.file_name()).is_none_or(|was| *was != now || now.0.is_some_and(|t| t >= since))
+        })
         .map(|e| show(&e.path()))
-        .filter(|p| !p.ends_with(".pixmith-tmp"))
         .collect();
     out.sort();
-    out.truncate(500);
     out
 }
 
@@ -176,14 +199,32 @@ fn export(e: &mut Engine, a: ExportArgs) -> R<Out> {
     if a.dry_run.unwrap_or(false) {
         return Out::json(json!({ "doc": d.id, "outputs": jobs, "dry_run": true }));
     }
-    let since = SystemTime::now() - std::time::Duration::from_secs(1);
+    let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
+    let before = listing(&dir);
+    let since = SystemTime::now();
     let c = cstr(&path.to_string_lossy());
     clear_error();
     let n = unsafe { export_plan::pixmith_export_run(raw, &o, c.as_ptr()) };
     if n < 0 {
         return Err(fail(format!("could not export {}", show(&path))));
     }
-    Out::json(json!({ "doc": d.id, "files_written": n, "files": written_files(&path, since) }))
+    // What the format writes: images or animations, and the sheet's JSON when asked.
+    let mut exts = vec![match a.format {
+        Format::Gif => "gif",
+        _ => "png",
+    }];
+    if a.json.unwrap_or(false) && a.format == Format::Sheet {
+        exts.push("json");
+    }
+    let files = written_files(&path, &before, since, &exts, true);
+    let mut v = json!({ "doc": d.id, "files_written": files.len(), "files": files });
+    if files.len() as i64 != i64::from(n) {
+        v["note"] = json!(format!(
+            "the exporter counted {n} output(s); files_written and files list what is on disk now (new or rewritten, extension {})",
+            exts.join(" / ")
+        ));
+    }
+    Out::json(v)
 }
 
 #[derive(Deserialize, JsonSchema, Clone, Copy, PartialEq, Eq, Debug)]
@@ -331,7 +372,8 @@ fn export_godot(e: &mut Engine, a: GodotArgs) -> R<Out> {
                 .ok_or_else(|| fail("could not store the settings"))
         })?;
     }
-    let since = SystemTime::now() - std::time::Duration::from_secs(1);
+    let before = listing(&tres.parent().map(Path::to_path_buf).unwrap_or_default());
+    let since = SystemTime::now();
     let mut w = std::ptr::null_mut();
     clear_error();
     let ok = unsafe { godot::pixmith_export_godot(raw, c.as_ptr(), &mut w) };
@@ -339,15 +381,7 @@ fn export_godot(e: &mut Engine, a: GodotArgs) -> R<Out> {
     if !ok {
         return Err(fail("the Godot export failed"));
     }
-    let dir = tres.parent().map(Path::to_path_buf).unwrap_or_default();
-    let mut files: Vec<String> = std::fs::read_dir(&dir)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter(|e| e.metadata().and_then(|m| m.modified()).is_ok_and(|t| t >= since))
-        .map(|e| show(&e.path()))
-        .collect();
-    files.sort();
+    let files = written_files(&tres, &before, since, &["tres", "tscn", "png"], false);
     Out::json(
         json!({ "doc": d.id, "tres": show(&tres), "files": files, "warnings": lines(&warnings), "settings_saved": a.save_settings.unwrap_or(false) }),
     )
@@ -445,13 +479,14 @@ fn export_godot_tileset(e: &mut Engine, a: TilesetArgs) -> R<Out> {
         v["tileset"] = tileset_shape_json(d, ts, a.write_scene.unwrap_or(false));
         return Out::json(v);
     }
-    let since = SystemTime::now() - std::time::Duration::from_secs(1);
+    let before = listing(&tres.parent().map(Path::to_path_buf).unwrap_or_default());
+    let since = SystemTime::now();
     if !unsafe { gts::pixmith_export_godot_tileset_ex(raw, ts, r.as_ptr(), t.as_ptr(), &opts) } {
         return Err(fail("the TileSet export failed"));
     }
     let warnings = take_string_safe(gts::pixmith_godot_tileset_warning());
     Out::json(
-        json!({ "doc": d.id, "tileset": ts, "tres": show(&tres), "files": written_files(&tres, since), "warnings": lines(&warnings) }),
+        json!({ "doc": d.id, "tileset": ts, "tres": show(&tres), "files": written_files(&tres, &before, since, &["tres", "tscn", "png"], true), "warnings": lines(&warnings) }),
     )
 }
 

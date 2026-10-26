@@ -6,8 +6,14 @@ use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::time::{Duration, Instant};
 
-/// Longest message the protocol allows.
+/// Longest message the protocol allows (the app closes the connection on a longer one).
 const MAX_LINE: u64 = 64 << 20;
+/// What a request line may be: the protocol's limit minus a margin for the newline and the app's own counting.
+const MAX_REQUEST: u64 = MAX_LINE - (64 << 10);
+/// Lowers [`MAX_REQUEST`] (bytes); for tests of the too-large path, which would otherwise need a 64 MiB document.
+const MAX_REQUEST_ENV: &str = "PIXMITH_LIVE_MAX_MESSAGE";
+/// What a failed write says first; [`sent_nothing`] tells such an error from one that happened while waiting.
+const SEND_FAILED: &str = "cannot talk to the Pixmith app";
 /// How long a request may take in all. The app answers a big `documents.apply` or `documents.open` only after it
 /// has decoded the document on its UI thread, which can take minutes for a large sheet.
 pub const ANSWER_TIMEOUT: Duration = Duration::from_secs(300);
@@ -22,6 +28,9 @@ pub const UNKNOWN_DOC: i64 = -32004;
 /// `game.capture` found no running game, or no frame arrived in time.
 pub const NO_GAME: i64 = -32012;
 pub const NO_METHOD: i64 = -32601;
+/// Not from the app: the request was larger than one live message may be, so it was not sent at all (the
+/// connection is fine and the app saw nothing).
+pub const TOO_LARGE: i64 = -32099;
 /// Bad or unknown parameters (an app that does not know a newer parameter).
 pub const INVALID_PARAMS: i64 = -32602;
 
@@ -53,9 +62,16 @@ pub struct AppInfo {
     pub port: u16,
 }
 
+/// Whether an `Io` error happened while sending the request (so the app cannot have acted on it: it answers
+/// only after reading a whole line) and not while waiting for the answer.
+pub fn sent_nothing(message: &str) -> bool {
+    message.starts_with(SEND_FAILED)
+}
+
 pub struct Conn {
     reader: BufReader<TcpStream>,
     next: u64,
+    max_request: u64,
     pub info: AppInfo,
 }
 
@@ -77,6 +93,10 @@ impl Conn {
         let mut conn = Conn {
             reader: BufReader::new(stream),
             next: 1,
+            max_request: std::env::var(MAX_REQUEST_ENV)
+                .ok()
+                .and_then(|v| v.trim().parse::<u64>().ok())
+                .map_or(MAX_REQUEST, |v| v.min(MAX_REQUEST)),
             info: AppInfo {
                 app: entry.app.clone(),
                 version: entry.version.clone(),
@@ -89,7 +109,7 @@ impl Conn {
         let hello = conn
             .request(
                 "hello",
-                json!({ "token": entry.token, "client": "pixmith-mcp",
+                &json!({ "token": entry.token, "client": "pixmith-mcp",
                         "client_version": env!("CARGO_PKG_VERSION"), "protocol": PROTOCOL }),
             )
             .map_err(|e| format!("the app (pid {}) refused the connection: {e}", entry.pid))?;
@@ -114,17 +134,44 @@ impl Conn {
     }
 
     /// One request and its response.
-    pub fn request(&mut self, method: &str, params: Value) -> Result<Value, RpcError> {
+    pub fn request(&mut self, method: &str, params: &Value) -> Result<Value, RpcError> {
+        #[derive(serde::Serialize)]
+        struct Request<'a> {
+            jsonrpc: &'static str,
+            id: u64,
+            method: &'a str,
+            params: &'a Value,
+        }
         let id = self.next;
         self.next += 1;
-        let line = serde_json::to_string(&json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }))
+        let mut line = serde_json::to_vec(&Request { jsonrpc: "2.0", id, method, params })
             .map_err(|e| RpcError::Io(e.to_string()))?;
+        // The app answers a message over its limit by closing the connection (and the sender sees "Broken
+        // pipe"), so such a request is not sent: the connection stays good and the caller gets a clear error.
+        if line.len() as u64 > self.max_request {
+            return Err(RpcError::Rpc {
+                code: TOO_LARGE,
+                message: format!(
+                    "the {method} request is {:.1} MiB, over the {:.0} MiB the app accepts in one message",
+                    line.len() as f64 / 1048576.0,
+                    self.max_request as f64 / 1048576.0
+                ),
+            });
+        }
+        line.push(b'\n');
         let deadline = Instant::now() + ANSWER_TIMEOUT;
         let stream = self.reader.get_mut();
-        write_patiently(stream, line.as_bytes(), deadline)
-            .and_then(|_| write_patiently(stream, b"\n", deadline))
-            .and_then(|_| flush_patiently(stream, deadline))
-            .map_err(|e| RpcError::Io(format!("cannot talk to the Pixmith app: {e}")))?;
+        let sent = write_patiently(stream, &line, deadline).and_then(|_| flush_patiently(stream, deadline));
+        drop(line);
+        if let Err(e) = sent {
+            let mut why = e.to_string();
+            if matches!(e.kind(), ErrorKind::BrokenPipe | ErrorKind::ConnectionReset | ErrorKind::ConnectionAborted)
+                && let Some(said) = self.last_words()
+            {
+                why = format!("{why}; the app said: {said}");
+            }
+            return Err(RpcError::Io(format!("{SEND_FAILED}: {why}")));
+        }
         let mut buf = Vec::new();
         let n = read_line_patiently(&mut self.reader, &mut buf, deadline)
             .map_err(|e| RpcError::Io(format!("no answer from the Pixmith app: {e}")))?;
@@ -136,6 +183,11 @@ impl Conn {
         }
         let v: Value = serde_json::from_slice(&buf)
             .map_err(|e| RpcError::Io(format!("the Pixmith app sent something that is not JSON: {e}")))?;
+        if v.get("id").is_none_or(Value::is_null)
+            && let Some(m) = v.pointer("/error/message").and_then(Value::as_str)
+        {
+            return Err(RpcError::Io(format!("the Pixmith app refused the request and closed the connection: {m}")));
+        }
         if v.get("id") != Some(&json!(id)) {
             return Err(RpcError::Io(format!("the Pixmith app answered out of order (wanted id {id})")));
         }
@@ -146,6 +198,16 @@ impl Conn {
             });
         }
         Ok(v.get("result").cloned().unwrap_or(Value::Null))
+    }
+}
+
+impl Conn {
+    /// After the app closed the connection on a request: what it said before (its error message), if anything.
+    fn last_words(&mut self) -> Option<String> {
+        let mut buf = Vec::new();
+        read_line_patiently(&mut self.reader, &mut buf, Instant::now() + Duration::from_millis(1500)).ok()?;
+        let v: Value = serde_json::from_slice(&buf).ok()?;
+        v.pointer("/error/message").and_then(Value::as_str).map(str::to_string)
     }
 }
 

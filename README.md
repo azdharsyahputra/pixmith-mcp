@@ -214,6 +214,10 @@ The server also provides:
 - `layer` with `action: "import_png"` adds the PNG as a new layer; with `replace: true` it puts the PNG into the
   existing `layer` at `frame` instead (one undo step; the layer keeps name, order, opacity and blend mode; `x` / `y`
   shift it, `name` renames the layer).
+- Memory: the real limit is roughly frames x layers x canvas size (width x height x 4 bytes per cel) for cels that are
+  not linked. Linking cels (`cel` `link`, or `frame` `duplicate` with `link: true`, which makes any number of copies in
+  one undo step) or using a smaller canvas avoids it. In live mode the whole document goes to the app in one message
+  of at most 64 MiB, so a very large document is refused before it is sent (nothing changes in the app).
 - Large results are bounded: `get_pixels` returns at most 16384 pixels per call (4096 as hex), `render` at most 16
   images of at most 4096 px, `history` is paginated, `doc_info` truncates very long frame lists.
 
@@ -308,6 +312,11 @@ game_screenshot  {"scale": 2}                                           // -> im
   sure the Pixmith app is 0.5.1 or later; a game that is not running or paused in the debugger sends no frame.
 - You do not want the agent to touch the app: start the server with `--live off` (`print-config <client> --live off`
   writes it into the client configuration).
+- "Broken pipe" / "closed the connection" on a heavy edit: the app closes a connection whose message is over 64 MiB, and
+  every edit sends the whole document, which grows with frames x layers x canvas size for unlinked cels (hundreds of
+  `frame duplicate` calls, one per frame, got there). The server now refuses such a request before sending, with the
+  size and what to do. Make one call with `frame duplicate` `count: N` (and `link: true`), link cels, or use a smaller
+  canvas.
 - "busy" errors mean a dialog is open in the app or you are in the middle of a stroke; the server already waited a few
   seconds. Close the dialog and ask again.
 
