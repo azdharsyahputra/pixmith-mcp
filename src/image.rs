@@ -13,6 +13,16 @@ impl Img {
         Img { w, h, px: vec![0; w * h * 4] }
     }
 
+    /// The `w` x `h` rectangle at (`x`, `y`), which must lie inside the image.
+    pub fn crop(&self, x: usize, y: usize, w: usize, h: usize) -> Img {
+        let mut out = Img::new(w, h);
+        for row in 0..h {
+            let src = ((y + row) * self.w + x) * 4;
+            out.px[row * w * 4..(row + 1) * w * 4].copy_from_slice(&self.px[src..src + w * 4]);
+        }
+        out
+    }
+
     pub fn upscale(&self, s: usize) -> Img {
         if s <= 1 {
             return self.clone();

@@ -42,7 +42,7 @@ pub fn tools() -> Vec<ToolDef> {
             WRITE_FILES,
             TilesetArgs,
             export_godot_tileset,
-            "File > Export Tileset to Godot: export a tileset as a Godot 4 TileSet resource (.tres) with its atlas PNG, including the terrain set and peering bits from terrain auto-tiling (or `mode` when there is none), flipped alternatives and optional collision shapes; write_scene=true also writes a .tscn with TileMapLayer nodes painted from the document's tilemap layers. Isometric tilesets (Tilemap iso) export as tile_shape ISOMETRIC / tile_layout DIAMOND_DOWN with tile_size = the diamond cell, every tile's pivot as its texture_origin, peering bits turned to Godot's isometric names and no flipped alternative tiles; the scene positions each isometric TileMapLayer at the layer's grid offset (its elevation) with y_sort_enabled so tall tiles overlap the cells behind them. preview=true describes the export without writing."
+            "File > Export Tileset to Godot: export a tileset as a Godot 4 TileSet resource (.tres) with its atlas PNG, including the terrain set and peering bits from terrain auto-tiling (or `mode` when there is none), flipped alternatives and optional collision shapes; write_scene=true also writes a .tscn with TileMapLayer nodes painted from the document's tilemap layers. Isometric tilesets (Tilemap iso) export as tile_shape ISOMETRIC / tile_layout DIAMOND_DOWN with tile_size = the diamond cell, every tile's pivot as its texture_origin, peering bits turned to Godot's isometric names and no flipped alternative tiles; the scene positions each isometric TileMapLayer at the layer's grid offset (its elevation) with y_sort_enabled so tall tiles overlap the cells behind them. preview=true describes the export without writing (the core's description plus a `tileset` block: tile_shape, tile_layout, tile_size, cell and image sizes, a texture_origin summary and the isometric scene layers with their positions)."
         ),
     ]
 }
@@ -440,7 +440,10 @@ fn export_godot_tileset(e: &mut Engine, a: TilesetArgs) -> R<Out> {
         if p.is_null() {
             return Err(fail("the TileSet export would fail"));
         }
-        return Out::json(json!({ "doc": d.id, "preview": true, "description": unsafe { take_string(p) } }));
+        let description = unsafe { take_string(p) };
+        let mut v = json!({ "doc": d.id, "preview": true, "description": description });
+        v["tileset"] = tileset_shape_json(d, ts, a.write_scene.unwrap_or(false));
+        return Out::json(v);
     }
     let since = SystemTime::now() - std::time::Duration::from_secs(1);
     if !unsafe { gts::pixmith_export_godot_tileset_ex(raw, ts, r.as_ptr(), t.as_ptr(), &opts) } {
@@ -450,6 +453,64 @@ fn export_godot_tileset(e: &mut Engine, a: TilesetArgs) -> R<Out> {
     Out::json(
         json!({ "doc": d.id, "tileset": ts, "tres": show(&tres), "files": written_files(&tres, since), "warnings": lines(&warnings) }),
     )
+}
+
+/// What the TileSet resource and the scene would say about the tile shape: tile_shape / tile_layout / tile_size, the
+/// cell and image sizes, a summary of the tiles' `texture_origin`s and the isometric layers' scene positions, matching
+/// what the real export writes (the core's own description does not list them).
+fn tileset_shape_json(d: &crate::engine::DocEntry, ts: u32, write_scene: bool) -> Value {
+    use pixmith_core::document::tilemap as tm;
+    let raw = d.doc.raw();
+    let (tw, th) = unsafe { (tm::pixmith_tileset_tile_width(raw, ts), tm::pixmith_tileset_tile_height(raw, ts)) };
+    let mut cell = [0u32; 2];
+    if !unsafe { tm::pixmith_tileset_iso_cell(raw, ts, cell.as_mut_ptr()) } {
+        return json!({ "tile_shape": "square", "tile_layout": null, "tile_size": [tw, th], "cell_size": [tw, th] });
+    }
+    // texture_origin per tile (tile 0 is the empty tile and is not exported), grouped by value.
+    let mut groups: Vec<([i32; 2], Vec<u32>)> = Vec::new();
+    for t in 1..unsafe { tm::pixmith_tileset_tile_count(raw, ts) } {
+        let mut o = [0i32; 2];
+        if !unsafe { tm::pixmith_tile_texture_origin(raw, ts, t, o.as_mut_ptr()) } {
+            continue;
+        }
+        match groups.iter_mut().find(|g| g.0 == o) {
+            Some(g) => g.1.push(t),
+            None => groups.push((o, vec![t])),
+        }
+    }
+    let origins: Vec<Value> = groups
+        .iter()
+        .map(|(o, tiles)| {
+            json!({ "texture_origin": o, "tiles": tiles.len(), "first_tiles": tiles.iter().take(8).collect::<Vec<_>>() })
+        })
+        .collect();
+    let layers: Vec<Value> = (0..d.layer_count())
+        .filter(|&l| {
+            d.is_tilemap(l)
+                && unsafe { tm::pixmith_layer_tileset(raw, l) } == ts as i32
+                && unsafe { tm::pixmith_layer_is_iso(raw, l) }
+        })
+        .map(|l| {
+            let mut off = [0i32; 2];
+            unsafe { tm::pixmith_layer_grid_offset(raw, l, off.as_mut_ptr()) };
+            json!({
+                "layer": l, "name": d.layer_name(l), "position": off, "y_sort_enabled": true,
+                // The scene writes `position = Vector2(x, y)` only when it is not (0, 0).
+                "position_written": off != [0, 0],
+            })
+        })
+        .collect();
+    json!({
+        "tile_shape": "isometric",
+        "tile_layout": "diamond_down",
+        "tile_size": cell,
+        "cell_size": cell,
+        "tile_image_size": [tw, th],
+        "texture_origins": origins,
+        "scene_layers": layers,
+        "scene_written": write_scene,
+        "note": "tile_size is the diamond cell; each tile image keeps its own size (texture_region_size) and its pivot is written as texture_origin; scene_layers lists the TileMapLayer nodes (positioned at the layer's grid offset, y_sort_enabled) that write_scene=true adds",
+    })
 }
 
 fn take_string_safe(p: *mut std::ffi::c_char) -> String {

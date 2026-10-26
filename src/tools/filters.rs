@@ -20,7 +20,7 @@ pub fn tools() -> Vec<ToolDef> {
         CHANGE,
         FilterArgs,
         filter,
-        "Apply an FX filter to a cel (default), every frame of a layer (target=layer) or every layer of a frame (target=frame), limited to the selection's bounds when something is selected or to `region`. Kinds and their parameters: replace_color (from_color, to_color, tolerance), invert, desaturate, hsl (hue -180..180, saturation and lightness -100..100), brightness_contrast (brightness, contrast -100..100), color_balance (red, green, blue offsets -255..255), outline (color, inside, eight_connected), drop_shadow (dx, dy, color), remove_isolated_pixels (eight_connected), blur, sharpen (3x3, alpha-aware), curves (curve_rgb / curve_red / curve_green / curve_blue / curve_alpha: [[x, y], ...] control points in 0-255), clean_edges (FX > Clean Edges…: tidy a sprite traced from reference art, never touching interior detail such as eyes, 1 px highlights or fingers; passes halo [halo_rings, halo_gain, halo_saturation], despeckle [pieces smaller than N pixels that touch the outside], holes [fill enclosed transparent areas smaller than N], light_specks, thin_outline [thickness, outline_color, outline_tolerance, outline_luma]; name no pass to run halo + despeckle + thin_outline with their defaults, otherwise only the passes you name run; use the read-only `lint` tool to see what is wrong first), remove_background (FX > Remove Background…: make the paper background transparent by flood fill from the border: tolerance 0-255 default 28, shadow [also a soft drop shadow, shadow_depth 1-95 percent], global [also enclosed background-colored pixels], color [background color; default the dominant border color]). preview=true returns an image of the result and changes nothing."
+        "Apply an FX filter to a cel (default), every frame of a layer (target=layer) or every layer of a frame (target=frame), limited to the selection's bounds when something is selected or to `region`. Kinds and their parameters: replace_color (from_color, to_color, tolerance), invert, desaturate, hsl (hue -180..180, saturation and lightness -100..100), brightness_contrast (brightness, contrast -100..100), color_balance (red, green, blue offsets -255..255), outline (color, inside, eight_connected), drop_shadow (dx, dy, color), remove_isolated_pixels (eight_connected), blur, sharpen (3x3, alpha-aware), curves (curve_rgb / curve_red / curve_green / curve_blue / curve_alpha: [[x, y], ...] control points in 0-255), clean_edges (FX > Clean Edges…: tidy a sprite traced from reference art, never touching interior detail such as eyes, 1 px highlights or fingers; passes halo [halo_rings, halo_gain, halo_saturation], despeckle [pieces smaller than N pixels that touch the outside], holes [fill enclosed transparent areas smaller than N], light_specks, thin_outline [thickness, outline_color, outline_tolerance, outline_luma]; name no pass to run halo + despeckle + thin_outline with their defaults, otherwise only the passes you name run; use the read-only `lint` tool to see what is wrong first), remove_background (FX > Remove Background…: make the paper background transparent by flood fill from the border: tolerance 0-255 default 28, shadow [also a soft drop shadow, shadow_depth 1-95 percent], global [also enclosed background-colored pixels], color [background color; default the dominant border color]). preview=true returns an image of the result and changes nothing; with `region` the image is cropped to that region (the result says so)."
     )]
 }
 
@@ -66,7 +66,7 @@ pub struct FilterArgs {
     pub frame: Option<u32>,
     /// Only change pixels inside this rectangle (default: the selection bounds, or the whole canvas).
     pub region: Option<Rect>,
-    /// Return a preview image instead of applying.
+    /// Return a preview image instead of applying (cropped to `region` when given).
     pub preview: Option<bool>,
     /// replace_color: color to replace.
     pub from_color: Option<Color>,
@@ -271,15 +271,23 @@ fn filter(e: &mut Engine, a: FilterArgs) -> R<Out> {
         } {
             return Err(fail("could not preview the filter"));
         }
-        let scale = auto_scale(cw, ch, a.scale);
-        let img = Img { w: cw, h: ch, px: out }
-            .upscale(scale)
-            .on_background(parse_background(&a.background)?, (scale * 4).clamp(4, 16));
-        return Ok(Out {
-            value: json!({ "doc": d.id, "preview": title, "frame": frame, "scale": scale, "applied": false }),
-            images: vec![img.png()?],
-            text: None,
-        });
+        // A region crops the preview (before scaling); a selection alone does not.
+        let full = Img { w: cw, h: ch, px: out };
+        let (full, crop) = match a.region {
+            Some(_) => (full.crop(x as usize, y as usize, w as usize, h as usize), Some((x, y, w, h))),
+            None => (full, None),
+        };
+        let scale = auto_scale(full.w, full.h, a.scale);
+        let img = full.upscale(scale).on_background(parse_background(&a.background)?, (scale * 4).clamp(4, 16));
+        let mut value = json!({ "doc": d.id, "preview": title, "frame": frame, "scale": scale, "applied": false });
+        if let Some((x, y, w, h)) = crop {
+            value["region"] = json!({ "x": x, "y": y, "w": w, "h": h });
+            value["image_size"] = json!([img.w, img.h]);
+            value["note"] = json!(format!(
+                "the preview is cropped to the region {w}x{h} at ({x}, {y}) of the {cw}x{ch} canvas; nothing was changed"
+            ));
+        }
+        return Ok(Out { value, images: vec![img.png()?], text: None });
     }
     // Remove Background reports what it found (the whole cel; a selection or region may keep part of it).
     let background = if a.kind == Kind::RemoveBackground && target == Target::Cel {
