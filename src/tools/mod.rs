@@ -6,6 +6,7 @@ use serde::de::DeserializeOwned;
 use serde_json::{Map, Value, json};
 
 pub mod app;
+pub mod cleanup;
 pub mod color;
 pub mod docs;
 pub mod draw;
@@ -21,6 +22,7 @@ pub mod tilemap;
 pub mod transform;
 pub mod tween;
 pub mod view;
+pub mod warp;
 
 /// What a tool returns: a JSON value (sent as text) and any PNG images.
 #[derive(Default)]
@@ -102,9 +104,11 @@ pub fn all() -> Vec<ToolDef> {
         draw::tools(),
         select::tools(),
         transform::tools(),
+        warp::tools(),
         layers::tools(),
         color::tools(),
         filters::tools(),
+        cleanup::tools(),
         tilemap::tools(),
         slices::tools(),
         tween::tools(),

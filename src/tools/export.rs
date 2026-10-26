@@ -42,7 +42,7 @@ pub fn tools() -> Vec<ToolDef> {
             WRITE_FILES,
             TilesetArgs,
             export_godot_tileset,
-            "File > Export Tileset to Godot: export a tileset as a Godot 4 TileSet resource (.tres) with its atlas PNG, including the terrain set and peering bits from terrain auto-tiling (or `mode` when there is none), flipped alternatives and optional collision shapes; write_scene=true also writes a .tscn with TileMapLayer nodes painted from the document's tilemap layers. preview=true describes the export without writing."
+            "File > Export Tileset to Godot: export a tileset as a Godot 4 TileSet resource (.tres) with its atlas PNG, including the terrain set and peering bits from terrain auto-tiling (or `mode` when there is none), flipped alternatives and optional collision shapes; write_scene=true also writes a .tscn with TileMapLayer nodes painted from the document's tilemap layers. Isometric tilesets (Tilemap iso) export as tile_shape ISOMETRIC / tile_layout DIAMOND_DOWN with tile_size = the diamond cell, every tile's pivot as its texture_origin, peering bits turned to Godot's isometric names and no flipped alternative tiles; the scene positions each isometric TileMapLayer at the layer's grid offset (its elevation) with y_sort_enabled so tall tiles overlap the cells behind them. preview=true describes the export without writing."
         ),
     ]
 }

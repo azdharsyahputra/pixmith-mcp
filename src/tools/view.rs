@@ -7,6 +7,7 @@ use crate::engine::{DocEntry, Engine, R, Ref};
 use crate::image::{Background, Img};
 use pixmith_core::document::Sprite;
 use pixmith_core::document::layers::render_frame_rect;
+use pixmith_core::render::diff::{self, DiffSource, FrameDiff};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -21,7 +22,16 @@ pub fn tools() -> Vec<ToolDef> {
             READ,
             RenderArgs,
             render,
-            "Render the sprite as a PNG image you can look at (MCP image content). Defaults: the active frame, all visible layers composited, scaled up so the long side is about 512 px, on a light checkerboard so transparency is visible. Options: other frames (up to 16 images at once), a single layer or group in isolation (shown even if hidden), a region, an explicit integer scale, a solid/transparent background, and Onion Skin (onion_skin: neighboring frames tinted red = before, blue = after). The app's Grid, Isometric Grid, Tiled Mode and Preview are view-only and are not drawn. Never changes the document. For exact colors use get_pixels."
+            "Render the sprite as a PNG image you can look at (MCP image content). Defaults: the active frame, all visible layers composited, scaled up so the long side is about 512 px, on a light checkerboard so transparency is visible. Options: other frames (up to 16 images at once), a single layer or group in isolation (shown even if hidden), a region, an explicit integer scale, a solid/transparent background, and Onion Skin (onion_skin: neighboring frames tinted red = before, blue = after) and View > Frame Difference (diff_prev=true: pixels that changed from the previous frame tinted over the render, magenta = changed, green = appeared, red = disappeared; diff_opacity, diff_wrap, diff_layer; see also the frame_diff tool for counts). The app's Grid, Isometric Grid, Tiled Mode and Preview are view-only and are not drawn. Never changes the document. For exact colors use get_pixels."
+        ),
+        tool!(
+            "Viewing",
+            "frame_diff",
+            "Frame difference",
+            READ,
+            FrameDiffArgs,
+            frame_diff,
+            "View > Frame Difference as numbers (and optionally an image): which pixels a frame changed compared with the frame before it, to find parts of a character that \"stuck\" or tore during a walk cycle (onion skin shows where the previous frame was, this shows what did not move with the rest). Counts `changed` (visible in both frames but a different color or alpha), `appeared` (transparent before), `disappeared` (transparent now), their `total`, `bounds` {x, y, w, h} around all of them (null when the frames match) and `reference_frame` (the frame compared against). The frame before frame 0 is the last frame when wrap=true (default; right for looping animations), none when wrap=false (then every count is 0). Compares the composite of the visible layers, or only the cel of `layer` (hidden layers count). Give `frames` or all=true for a table over many frames without images; image=true returns the difference tinted over the frame (magenta changed, green appeared, red disappeared). `render` with diff_prev=true draws the same overlay on any render. Never changes the document."
         ),
         tool!(
             "Viewing",
@@ -82,6 +92,14 @@ pub struct RenderArgs {
     pub background: Option<String>,
     /// Show neighboring frames faintly (off by default).
     pub onion_skin: Option<Onion>,
+    /// Frame Difference: tint the pixels that changed from the previous frame over the render (magenta changed, green appeared, red disappeared). Off by default.
+    pub diff_prev: Option<bool>,
+    /// diff_prev: opacity of the tint, 0.1-1 (default 0.65).
+    pub diff_opacity: Option<f32>,
+    /// diff_prev: the frame before frame 0 is the last frame (default true; false = frame 0 has no reference).
+    pub diff_wrap: Option<bool>,
+    /// diff_prev: compare only this layer's cel instead of the composite (the app's "Active layer only").
+    pub diff_layer: Option<Ref>,
 }
 
 /// The sprite with only layer `i` shown (plus the groups around it, and its children if it is a group).
@@ -164,6 +182,9 @@ fn render(e: &mut Engine, a: RenderArgs) -> R<Out> {
     let s = isolated.as_ref().unwrap_or(base);
     let n = d.doc.frame_count();
     let draw = |f: u32| Img { w: rect.2, h: rect.3, px: render_frame_rect(s, f as usize, rect) };
+    let diff_source = diff_source(d, a.diff_layer.as_ref(), a.diff_prev.unwrap_or(false))?;
+    let diff_alpha = (a.diff_opacity.unwrap_or(0.65).clamp(0.1, 1.0) * 255.0).round() as u8;
+    let mut diffs = Vec::new();
     let mut images = Vec::new();
     for &f in &frames {
         let mut img = Img::new(rect.2, rect.3);
@@ -181,6 +202,18 @@ fn render(e: &mut Engine, a: RenderArgs) -> R<Out> {
             }
         }
         img.draw_over(&draw(f), 1.0);
+        if let Some(source) = diff_source
+            && let Some(df) = frame_diff_of(s, f, source, a.diff_wrap.unwrap_or(true))
+        {
+            let tint = df.to_rgba(diff::DEFAULT_COLORS, diff_alpha);
+            let mut crop = Img::new(rect.2, rect.3);
+            for y in 0..rect.3 {
+                let src = ((rect.1 + y) * df.width + rect.0) * 4;
+                crop.px[y * rect.2 * 4..(y + 1) * rect.2 * 4].copy_from_slice(&tint[src..src + rect.2 * 4]);
+            }
+            img.draw_over(&crop, 1.0);
+            diffs.push(diff_json(f, &df));
+        }
         let out = img.upscale(scale).on_background(bg, (scale * 4).clamp(4, 16));
         images.push(out.png()?);
     }
@@ -191,10 +224,116 @@ fn render(e: &mut Engine, a: RenderArgs) -> R<Out> {
             "region": { "x": rect.0, "y": rect.1, "w": rect.2, "h": rect.3 },
             "scale": scale, "image_size": [rect.2 * scale, rect.3 * scale],
             "note": "each canvas pixel is scale x scale image pixels",
+            "frame_difference": (!diffs.is_empty()).then_some(diffs),
         }),
         images,
         text: None,
     })
+}
+
+/// What a frame-difference view compares: `None` when it is off.
+fn diff_source(d: &DocEntry, layer: Option<&Ref>, on: bool) -> R<Option<DiffSource>> {
+    if !on {
+        if layer.is_some() {
+            return Err("diff_layer needs diff_prev=true".into());
+        }
+        return Ok(None);
+    }
+    Ok(Some(match layer {
+        None => DiffSource::Composite,
+        Some(_) => DiffSource::Layer(d.image_layer(&layer.cloned())? as usize),
+    }))
+}
+
+fn frame_diff_of(s: &Sprite, frame: u32, source: DiffSource, wrap: bool) -> Option<FrameDiff> {
+    diff::frame_diff(s, frame as usize, source, wrap)
+}
+
+fn diff_json(frame: u32, d: &FrameDiff) -> Value {
+    json!({
+        "frame": frame,
+        "reference_frame": d.reference,
+        "changed": d.changed, "appeared": d.appeared, "disappeared": d.disappeared, "total": d.total(),
+        "bounds": d.bounds.map(|(x, y, w, h)| json!({ "x": x, "y": y, "w": w, "h": h })),
+    })
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct FrameDiffArgs {
+    /// Document id (see doc_list); optional when only one document is open.
+    pub doc: Option<String>,
+    /// Frame to compare with the one before it (default: the active frame).
+    pub frame: Option<u32>,
+    /// Several frames: one result row each, no image (max 4096). Overrides `frame`.
+    pub frames: Option<Vec<u32>>,
+    /// Every frame of the document (a table of rows, no image).
+    pub all: Option<bool>,
+    /// Compare only this layer's cel (index or name) instead of the composite of the visible layers.
+    pub layer: Option<Ref>,
+    /// The frame before frame 0 is the last frame (default true; false = frame 0 has no reference).
+    pub wrap: Option<bool>,
+    /// Also return the difference tinted over the frame as an image (a single frame only).
+    pub image: Option<bool>,
+    /// image: opacity of the tint, 0.1-1 (default 0.65).
+    pub opacity: Option<f32>,
+    /// image: integer upscale (default auto).
+    pub scale: Option<u32>,
+    /// image: "checker" (default), "transparent" or a color.
+    pub background: Option<String>,
+}
+
+fn frame_diff(e: &mut Engine, a: FrameDiffArgs) -> R<Out> {
+    let d = e.doc(&a.doc)?;
+    let n = d.doc.frame_count();
+    let many = a.all.unwrap_or(false) || a.frames.is_some();
+    let frames: Vec<u32> = if a.all.unwrap_or(false) {
+        (0..n).collect()
+    } else if let Some(f) = &a.frames {
+        if f.is_empty() || f.len() > 4096 {
+            return Err("frames needs 1-4096 frames".into());
+        }
+        f.iter().map(|&x| d.frame(Some(x))).collect::<R<Vec<_>>>()?
+    } else {
+        vec![d.frame(a.frame)?]
+    };
+    if many && a.image.unwrap_or(false) {
+        return Err("image=true works for one frame; drop frames / all".into());
+    }
+    let source = diff_source(d, a.layer.as_ref(), true)?.unwrap_or(DiffSource::Composite);
+    let wrap = a.wrap.unwrap_or(true);
+    let sprite = d.doc.sprite();
+    let mut rows = Vec::new();
+    let mut shown = None;
+    for &f in &frames {
+        let df = frame_diff_of(sprite, f, source, wrap).ok_or_else(|| format!("could not compare frame {f}"))?;
+        rows.push(diff_json(f, &df));
+        shown = Some(df);
+    }
+    let layer = a.layer.as_ref().map(|_| d.layer(&a.layer)).transpose()?;
+    let mut value = if many {
+        json!({ "doc": d.id, "layer": layer, "wrap": wrap, "frames": rows })
+    } else {
+        let mut v = rows.remove(0);
+        v["doc"] = json!(d.id);
+        v["layer"] = json!(layer);
+        v["wrap"] = json!(wrap);
+        v
+    };
+    let mut images = Vec::new();
+    if a.image.unwrap_or(false)
+        && let Some(df) = shown
+    {
+        let (w, h) = (d.doc.width() as usize, d.doc.height() as usize);
+        let alpha = (a.opacity.unwrap_or(0.65).clamp(0.1, 1.0) * 255.0).round() as u8;
+        let mut img = Img { w, h, px: render_frame_rect(sprite, frames[0] as usize, (0, 0, w, h)) };
+        img.draw_over(&Img { w, h, px: df.to_rgba(diff::DEFAULT_COLORS, alpha) }, 1.0);
+        let scale = auto_scale(w, h, a.scale);
+        images
+            .push(img.upscale(scale).on_background(parse_background(&a.background)?, (scale * 4).clamp(4, 16)).png()?);
+        value["legend"] = json!("magenta = changed, green = appeared, red = disappeared");
+        value["scale"] = json!(scale);
+    }
+    Ok(Out { value, images, text: None })
 }
 
 /// Pixels of one layer's cel at `frame` (canvas sized), or the composite when `layer` is `None`.

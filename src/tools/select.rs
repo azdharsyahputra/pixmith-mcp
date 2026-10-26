@@ -5,6 +5,7 @@ use super::{ADD, CHANGE, Hints, Out, ToolDef, need, tool};
 use crate::doc::fail;
 use crate::engine::{Clip, DocEntry, Engine, R, Ref, Undo};
 use crate::iso::Iso;
+use pixmith_core::document::tilemap as tm;
 use pixmith_core::paint::selection as sel;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -19,7 +20,7 @@ pub fn tools() -> Vec<ToolDef> {
             CHANGE,
             SelectArgs,
             select,
-            "Change the selection (one undo step each): rect (Rectangular Marquee: x, y, w, h), lasso (Lasso: freehand outline points), polygon (Polygonal Lasso: corner points), wand (Magic Wand at x, y with tolerance; contiguous by default), by_color (Select by Color: every pixel matching the color at x, y), iso_tile (Select > Isometric Tile: the diamond cell of an isometric grid, by a pixel x, y or by col, row; the grid is the document's iso_grid settings, default 32x16 at 0, 0, or give tile_w, tile_h, offset_x, offset_y), all, none, invert, expand/contract/border (by `amount` pixels). mode = replace (default), add or subtract combines with the existing selection. Also edits the selected pixels: delete (clear them), move_pixels (the Move tool: shift the selected pixels by dx, dy), crop (crop the canvas to the selection bounds). Returns the selection bounds. Drawing and filters only affect selected pixels while a selection exists; select none to remove it."
+            "Change the selection (one undo step each): rect (Rectangular Marquee: x, y, w, h), lasso (Lasso: freehand outline points), polygon (Polygonal Lasso: corner points), wand (Magic Wand at x, y with tolerance; contiguous by default), by_color (Select by Color: every pixel matching the color at x, y), iso_tile (Select > Isometric Tile: the diamond cell of an isometric grid, by a pixel x, y or by col, row; the grid is the active isometric tilemap layer's (or `layer`'s) when there is one, else the document's iso_grid settings, default 32x16 at 0, 0; or give tile_w, tile_h, offset_x, offset_y), all, none, invert, expand/contract/border (by `amount` pixels). mode = replace (default), add or subtract combines with the existing selection. Also edits the selected pixels: delete (clear them), move_pixels (the Move tool: shift the selected pixels by dx, dy), crop (crop the canvas to the selection bounds). Returns the selection bounds. Drawing and filters only affect selected pixels while a selection exists; select none to remove it."
         ),
         tool!(
             "Selection",
@@ -28,7 +29,7 @@ pub fn tools() -> Vec<ToolDef> {
             SETTING,
             IsoGridArgs,
             iso_grid,
-            "Read or set the isometric grid of a document: tile_w x tile_h (even, 4-4096; default 32 x 16) and offset_x / offset_y (where cell (0, 0)'s bounding box starts; default 0, 0). Cell (col, row) has its box at (offset_x + (col - row) * tile_w / 2, offset_y + (col + row) * tile_h / 2). `select` action iso_tile uses these as its defaults, so set the grid once. Actions: get (default), set (only the fields you give change), reset. Kept by this server for the document, not in the file or in the app (the app's Isometric Grid view settings cannot be read or written through the live protocol); it is lost when the server stops or the document is closed."
+            "Read or set the isometric grid of a document: tile_w x tile_h (even, 4-4096; default 32 x 16) and offset_x / offset_y (where cell (0, 0)'s bounding box starts; default 0, 0). Cell (col, row) has its box at (offset_x + (col - row) * tile_w / 2, offset_y + (col + row) * tile_h / 2). `select` action iso_tile uses these as its defaults, so set the grid once. When the document has an isometric tilemap layer (tilemap add_layer with cell_w; Tilemap iso) the grid IS that layer's: iso_grid get reports its cell size and offset (`source` \"layer\"; the layer is `layer`, else the active layer if it is isometric, else the only isometric layer), set moves the layer's grid offset (offset_x / offset_y; the cell size comes from its tileset, see tileset action set_iso) and select iso_tile uses it by default, so the overlay, the tilemap and the selection share one offset. Without an isometric layer the settings are kept by this server for the document (not in the file or in the app: the app's Isometric Grid view settings cannot be read or written through the live protocol) and are lost when the server stops or the document is closed. Actions: get (default), set (only the fields you give change), reset (forgets the server's setting)."
         ),
         tool!(
             "Selection",
@@ -102,15 +103,15 @@ pub struct SelectArgs {
     pub col: Option<i64>,
     /// iso_tile: cell row (with col).
     pub row: Option<i64>,
-    /// iso_tile: tile width in pixels, even, 4-4096 (default: the iso_grid setting, else 32).
+    /// iso_tile: tile width in pixels, even, 4-4096 (default: the isometric layer's cell, else the iso_grid setting, else 32).
     pub tile_w: Option<i32>,
-    /// iso_tile: tile height in pixels, even, 4-4096 (default: the iso_grid setting, else 16).
+    /// iso_tile: tile height in pixels, even, 4-4096 (default: the isometric layer's cell, else the iso_grid setting, else 16).
     pub tile_h: Option<i32>,
-    /// iso_tile: x of the grid's cell (0, 0) (default: the iso_grid setting, else 0).
+    /// iso_tile: x of the grid's cell (0, 0) (default: the isometric layer's offset, else the iso_grid setting, else 0).
     pub offset_x: Option<i32>,
-    /// iso_tile: y of the grid's cell (0, 0) (default: the iso_grid setting, else 0).
+    /// iso_tile: y of the grid's cell (0, 0) (default: the isometric layer's offset, else the iso_grid setting, else 0).
     pub offset_y: Option<i32>,
-    /// Layer sampled by wand/by_color and edited by delete/move_pixels (default: active).
+    /// Layer sampled by wand/by_color and edited by delete/move_pixels (default: active); iso_tile: the isometric tilemap layer whose grid to use.
     pub layer: Option<Ref>,
     /// Frame (default: active).
     pub frame: Option<u32>,
@@ -146,6 +147,40 @@ pub struct IsoGridArgs {
     pub offset_x: Option<i32>,
     /// set: y of cell (0, 0)'s bounding box.
     pub offset_y: Option<i32>,
+    /// The isometric tilemap layer whose grid to read or move (default: the active layer if isometric, else the only isometric layer).
+    pub layer: Option<Ref>,
+}
+
+/// The isometric tilemap layer a call is about: `layer` when given (it must be isometric), else the active layer
+/// if it is isometric, else the document's only isometric layer.
+pub fn iso_layer(d: &DocEntry, layer: &Option<Ref>) -> R<Option<u32>> {
+    let raw = d.doc.raw();
+    let is_iso = |l: u32| unsafe { tm::pixmith_layer_is_iso(raw, l) };
+    if layer.is_some() {
+        let l = d.layer(layer)?;
+        if !is_iso(l) {
+            return Err(format!("layer {l} ({:?}) is not an isometric tilemap layer", d.layer_name(l)));
+        }
+        return Ok(Some(l));
+    }
+    let active = d.layer.min(d.layer_count().saturating_sub(1));
+    if d.layer_count() > 0 && is_iso(active) {
+        return Ok(Some(active));
+    }
+    let all: Vec<u32> = (0..d.layer_count()).filter(|&l| is_iso(l)).collect();
+    Ok(if let [only] = all.as_slice() { Some(*only) } else { None })
+}
+
+/// The grid of an isometric tilemap layer.
+pub fn layer_grid(d: &DocEntry, l: u32) -> Iso {
+    let raw = d.doc.raw();
+    let ts = unsafe { tm::pixmith_layer_tileset(raw, l) }.max(0) as u32;
+    let (mut cell, mut off) = ([0u32; 2], [0i32; 2]);
+    unsafe {
+        tm::pixmith_tileset_iso_cell(raw, ts, cell.as_mut_ptr());
+        tm::pixmith_layer_grid_offset(raw, l, off.as_mut_ptr());
+    }
+    Iso::new(cell[0] as i32, cell[1] as i32, off[0], off[1])
 }
 
 fn iso_grid(e: &mut Engine, a: IsoGridArgs) -> R<Out> {
@@ -157,6 +192,55 @@ fn iso_grid(e: &mut Engine, a: IsoGridArgs) -> R<Out> {
     }
     if action == IsoGridAction::Set && !has_values {
         return Err("action `set` needs at least one of tile_w, tile_h, offset_x, offset_y".into());
+    }
+    let layer = iso_layer(e.doc(&a.doc)?, &a.layer)?;
+    if let Some(l) = layer {
+        let d = e.doc(&a.doc)?;
+        let cur = layer_grid(d, l);
+        let mut note = None;
+        match action {
+            IsoGridAction::Get => {}
+            IsoGridAction::Reset => {
+                note = Some(
+                    "reset forgets the server's own setting only; the isometric layer's grid is part of the document (move it with iso_grid set offset_x / offset_y)",
+                );
+            }
+            IsoGridAction::Set => {
+                let want = Iso::new(
+                    a.tile_w.unwrap_or(cur.w as i32),
+                    a.tile_h.unwrap_or(cur.h as i32),
+                    a.offset_x.unwrap_or(cur.x as i32),
+                    a.offset_y.unwrap_or(cur.y as i32),
+                );
+                if (want.w, want.h) != (cur.w, cur.h) {
+                    return Err(format!(
+                        "layer {l}'s cell is {} x {} pixels, set by its tileset (tileset action set_iso changes it while no layer shows tiles of it); iso_grid set moves the grid with offset_x / offset_y",
+                        cur.w, cur.h
+                    ));
+                }
+                let raw = d.doc.raw();
+                let (x, y) = (want.x as i32, want.y as i32);
+                d.edit("Move Isometric Grid", Undo::Step, |_| {
+                    unsafe { tm::pixmith_layer_set_grid_offset(raw, l, x, y) }
+                        .then_some(())
+                        .ok_or_else(|| fail("could not move the grid (offsets are limited to +-16777216 pixels)"))
+                })?;
+            }
+        }
+        if action == IsoGridAction::Reset {
+            e.iso_grids.remove(&id);
+        }
+        let d = e.doc(&a.doc)?;
+        let g = layer_grid(d, l);
+        let mut v = json!({
+            "doc": id, "tile_w": g.w, "tile_h": g.h, "offset_x": g.x, "offset_y": g.y,
+            "source": "layer", "layer": l, "layer_name": d.layer_name(l),
+            "stored": "in the document (the isometric tilemap layer's grid)",
+        });
+        if let Some(n) = note {
+            v["note"] = json!(n);
+        }
+        return Out::json(v);
     }
     match action {
         IsoGridAction::Get => {}
@@ -177,8 +261,9 @@ fn iso_grid(e: &mut Engine, a: IsoGridArgs) -> R<Out> {
     let g = grid_of(e.iso_grids.get(&id));
     Out::json(json!({
         "doc": id, "tile_w": g.w, "tile_h": g.h, "offset_x": g.x, "offset_y": g.y,
+        "source": if e.iso_grids.contains_key(&id) { "setting" } else { "default" },
         "is_default": !e.iso_grids.contains_key(&id),
-        "stored": "by this server, per document (not in the file or the app)",
+        "stored": "by this server, per document (not in the file or the app); an isometric tilemap layer (tilemap add_layer cell_w) would take over",
     }))
 }
 
@@ -208,7 +293,13 @@ fn select(e: &mut Engine, a: SelectArgs) -> R<Out> {
     let mut iso_info = None;
     match a.action {
         SelectAction::IsoTile => {
-            let saved = grid_of(grid.as_ref());
+            let from_layer = iso_layer(d, &a.layer)?;
+            // Explicit `layer`, else the active isometric layer, else the server's iso_grid setting, else 32 x 16.
+            let (saved, source) = match from_layer {
+                Some(l) => (layer_grid(d, l), "layer"),
+                None if grid.is_some() => (grid_of(grid.as_ref()), "setting"),
+                None => (grid_of(None), "default"),
+            };
             let g = Iso::new(
                 a.tile_w.unwrap_or(saved.w as i32),
                 a.tile_h.unwrap_or(saved.h as i32),
@@ -238,9 +329,10 @@ fn select(e: &mut Engine, a: SelectArgs) -> R<Out> {
                 }
                 Ok(())
             })?;
-            iso_info = Some(
-                json!({ "col": cell.0, "row": cell.1, "tile_w": g.w, "tile_h": g.h, "offset_x": g.x, "offset_y": g.y }),
-            );
+            iso_info = Some(json!({
+                "col": cell.0, "row": cell.1, "tile_w": g.w, "tile_h": g.h, "offset_x": g.x, "offset_y": g.y,
+                "grid_source": source, "layer": from_layer,
+            }));
         }
         SelectAction::Rect => {
             let (x, y) = (need(a.x, "x", &act)?, need(a.y, "y", &act)?);

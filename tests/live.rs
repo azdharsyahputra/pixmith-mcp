@@ -925,7 +925,95 @@ fn an_imported_app_document_is_saved_next_to_its_source() {
     let s = c.ok("doc_save", json!({ "doc": id }));
     let saved = s["saved"].as_str().unwrap();
     assert!(saved.ends_with("walk.pxmt"), "{s}");
-    assert_eq!(std::path::Path::new(saved).parent().unwrap(), std::fs::canonicalize(c.path("")).unwrap(), "{s}");
+    // `saved` is shown without the Windows verbatim prefix, so compare canonical forms on both sides.
+    let dir = std::fs::canonicalize(std::path::Path::new(saved).parent().unwrap()).unwrap();
+    assert_eq!(dir, std::fs::canonicalize(c.path("")).unwrap(), "{s}");
     assert!(s["note"].as_str().unwrap().contains("next to the imported file"), "{s}");
     assert_eq!(mock.doc_count(), 2);
+}
+
+// MARK: Cleanup, isometric tilemaps and the tween rig in the app
+
+#[test]
+fn isometric_tilemap_edits_land_in_the_app_and_share_the_grid_with_select() {
+    let (mut c, mock) = start();
+    let r = c.ok("tilemap", json!({ "action": "add_layer", "cell_w": 16, "cell_h": 8, "offset": [4, 2] }));
+    assert_eq!(r["doc"], "app:doc-1", "{r}");
+    assert_eq!(r["iso"]["offset"], json!([4, 2]), "{r}");
+    assert_eq!(mock.undo_labels("doc-1"), vec!["AI: tilemap add_layer"]);
+    let (offset, iso) = mock.with(|s| {
+        let sp = &s.docs[0].editor.sprite;
+        (sp.layers[1].offset, sp.tilesets[0].is_iso())
+    });
+    assert_eq!((offset, iso), ((4, 2), true), "the app's document got the isometric layer");
+    c.ok("tileset", json!({ "action": "add_tile" }));
+    c.ok("tilemap", json!({ "action": "stamp", "i": 0, "j": 0, "tile": 1 }));
+    assert_eq!(c.ok("tilemap", json!({ "action": "get_tile", "i": 0, "j": 0 }))["cell"]["tile"], 1);
+    let s = c.ok("select", json!({ "action": "iso_tile", "col": 0, "row": 0 }));
+    assert_eq!(s["iso_cell"]["offset_x"], 4, "{s}");
+    assert_eq!(s["iso_cell"]["grid_source"], "layer");
+    // Moving the grid is an undo step of the app.
+    c.ok("iso_grid", json!({ "action": "set", "offset_x": 6 }));
+    assert_eq!(mock.with(|s| s.docs[0].editor.sprite.layers[1].offset), (6, 2));
+    assert_eq!(mock.undo_labels("doc-1").last().unwrap(), "AI: iso_grid set");
+}
+
+#[test]
+fn read_only_cleanup_tools_do_not_touch_the_app_and_filters_apply() {
+    let (mut c, mock) = start();
+    c.ok("draw_pixels", json!({ "points": [[1, 1], [2, 1], [1, 2], [2, 2]], "color": "#c83c32" }));
+    c.ok("draw_pixels", json!({ "points": [[7, 7]], "color": "#c83c32" }));
+    mock.clear_calls();
+    let r = c.ok("lint", json!({}));
+    assert_eq!(r["cels"][0]["specks"]["count"], 1, "{r}");
+    c.ok("frame_diff", json!({ "frame": 0 }));
+    c.ok("render", json!({ "diff_prev": true }));
+    assert_eq!(mock.applies(), 0, "{:?}", mock.calls());
+    // Clean Edges removes the speck as one labelled step of the app.
+    let r = c.ok("filter", json!({ "kind": "clean_edges" }));
+    assert_eq!(r["changed"], true, "{r}");
+    assert_eq!(mock.pixel("doc-1", 7, 7), CLEAR);
+    assert_eq!(mock.undo_labels("doc-1").last().unwrap(), "AI: filter");
+    let w = c.ok("warp", json!({ "offsets": [[1, 0], [1, 0], [1, 0], [1, 0]] }));
+    assert_eq!(w["changed"], true, "{w}");
+    assert_eq!(mock.pixel("doc-1", 2, 1), [200, 60, 50, 255]);
+    assert_eq!(mock.pixel("doc-1", 1, 1), CLEAR);
+}
+
+#[test]
+fn trace_grid_import_arrives_as_a_new_tab_with_its_report() {
+    let (mut c, mock) = start_with(&[], &[]);
+    let (w, h, rgba, _) = common::pseudo_pixel();
+    let path = c.path("ai.png");
+    write_png(&path, w as u32, h as u32, &rgba);
+    let r = c.ok(
+        "doc_open",
+        json!({ "path": path.to_string_lossy(), "format": "trace_grid", "remove_background": true, "shadow": true }),
+    );
+    assert_eq!(r["doc"], "app:doc-1", "{r}");
+    assert_eq!((r["width"].as_u64(), r["height"].as_u64()), (Some(16), Some(16)), "{r}");
+    assert!((r["trace"]["pitch"][0].as_f64().unwrap() - 8.3).abs() < 0.4, "{r}");
+    assert_eq!(mock.with(|s| s.docs[0].editor.sprite.width), 16);
+    // trace on an open app document resizes it in one step.
+    let (w, h, rgba, _) = common::pseudo_pixel();
+    write_png(&c.path("again.png"), w as u32, h as u32, &rgba);
+    let r = c.ok("doc_open", json!({ "path": c.p("again.png") }));
+    assert_eq!(r["doc"], "app:doc-2", "{r}");
+    let t = c.ok("trace", json!({ "doc": "app:doc-2", "remove_background": true, "shadow": true }));
+    assert_eq!(t["canvas"], json!([16, 16]), "{t}");
+    assert_eq!(mock.with(|s| s.docs[1].editor.sprite.width), 16);
+    assert_eq!(mock.undo_labels("doc-2"), vec!["AI: trace"]);
+}
+
+#[test]
+fn tween_parent_links_are_kept_in_the_apps_document() {
+    let (mut c, mock) = start();
+    c.ok("layer", json!({ "action": "add", "name": "shin" }));
+    c.ok("frame", json!({ "action": "add" }));
+    c.ok("tween", json!({ "action": "set_key", "layer": 0, "frame": 1, "property": "rotation", "value": 45 }));
+    let r = c.ok("tween", json!({ "action": "set_parent", "layer": 1, "parent": 0 }));
+    assert_eq!(r["rig"]["parent"], 0, "{r}");
+    let parent = mock.with(|s| pixmith_core::gamedev::rig::parent_of(&s.docs[0].editor.sprite, 1));
+    assert_eq!(parent, Some(0));
+    assert_eq!(mock.undo_labels("doc-1").last().unwrap(), "AI: tween set_parent");
 }

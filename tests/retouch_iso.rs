@@ -114,7 +114,10 @@ fn iso_tile_selects_the_diamond_under_a_pixel() {
     // Default 32x16 grid: cell (1, 0) is the diamond whose box is x 16..48, y 8..24 (30 pixels wide at the middle).
     let s = c.ok("select", json!({ "action": "iso_tile", "x": 32, "y": 16 }));
     assert_eq!(s["bounds"], json!({ "x": 17, "y": 8, "w": 30, "h": 16 }), "{s}");
-    assert_eq!(s["iso_cell"], json!({ "col": 1, "row": 0, "tile_w": 32, "tile_h": 16, "offset_x": 0, "offset_y": 0 }));
+    assert_eq!(
+        s["iso_cell"],
+        json!({ "col": 1, "row": 0, "tile_w": 32, "tile_h": 16, "offset_x": 0, "offset_y": 0, "grid_source": "default", "layer": null })
+    );
     assert_eq!(undo_steps(&mut c), n + 1);
     let rows = painted_rows(&mut c);
     let widths: Vec<usize> = rows.iter().map(|r| r.2 - r.1 + 1).collect();

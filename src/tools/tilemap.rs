@@ -25,7 +25,7 @@ pub fn tools() -> Vec<ToolDef> {
             CHANGE,
             TilesetArgs,
             tileset,
-            "Work with tilesets (tile index 0 is always the empty tile). Actions: list, image (see every tile as one picture, labeled grid in index order), get_tile (pixels of one tile in the legend format), set_tile (replace a tile's pixels from `rows`+`legend` or a PNG `path`), add_tile (append an empty tile, or one with pixels), duplicate_tile, delete_tile (alias: remove_tile; cells using it become empty, higher indices shift down), rename, set_base_index (the number shown for tile 1). Drawing on a tilemap layer also edits the tiles it shows."
+            "Work with tilesets (tile index 0 is always the empty tile). Actions: list, image (see every tile as one picture, labeled grid in index order), get_tile (pixels of one tile in the legend format), set_tile (replace a tile's pixels from `rows`+`legend` or a PNG `path`), add_tile (append an empty tile, or one with pixels), duplicate_tile, delete_tile (alias: remove_tile; cells using it become empty, higher indices shift down), rename, set_base_index (the number shown for tile 1). Isometric tilesets (Tilemap iso): set_iso {cell_w, cell_h} makes a tileset isometric (cell_w 0 makes it square again; only while no layer shows its tiles), get_pivot / set_pivot {tile, pivot: [x, y]} / clear_pivot (the pivot is the point of the tile image, from its top-left corner, that sits on the center of the diamond; the default is centered and, for images taller than the cell, bottom-aligned so the diamond is the bottom cell_h rows), pivots (every tile's pivot, custom ones marked) and texture_origin {tile?} (the pivot as Godot's TileData.texture_origin, offset from the image center, which export_godot_tileset writes). Drawing on a tilemap layer also edits the tiles it shows."
         ),
         tool!(
             "Tilemaps",
@@ -34,7 +34,7 @@ pub fn tools() -> Vec<ToolDef> {
             CHANGE,
             TilemapArgs,
             tilemap,
-            "Tilemap layers: add_layer (new tilemap layer + tileset with tile_width x tile_height tiles, above `layer`), convert (turn an image layer into a tilemap, deduplicating tiles; flip_aware shares flipped copies), to_image (back to a normal layer), assign_tileset (use another tileset of the same tile size), stamp (the Tile Stamp mode: place `tile` at canvas pixel x, y, optional flip_x / flip_y / diagonal; tile 0 clears), get_tile, grid (the layer's tile indices as rows, read-only)."
+            "Tilemap layers: add_layer (new tilemap layer + tileset with tile_width x tile_height tiles, above `layer`), convert (turn an image layer into a tilemap, deduplicating tiles; flip_aware shares flipped copies), to_image (back to a normal layer), assign_tileset (use another tileset of the same tile size), stamp (the Tile Stamp mode: place `tile` at canvas pixel x, y, optional flip_x / flip_y / diagonal; tile 0 clears), get_tile, grid (the layer's tile indices as rows, read-only). Isometric tilemaps (Tilemap iso; 2:1 Godot DIAMOND_DOWN diamonds): add_layer with cell_w, cell_h (default cell_w / 2), layout diamond_down and offset [x, y] (the canvas pixel of cell (0, 0)'s box, e.g. cell 96 x 48 at offset [592, 360]) makes an isometric layer: cell (i, j) has its box at (offset_x + (i - j) * cell_w / 2, offset_y + (i + j) * cell_h / 2), i running down-right and j down-left; tile images (tile_width x tile_height, default the cell size) may be taller than the diamond (cliffs, tufts) and overlap the cells behind them. On iso layers stamp / get_tile take the cell `i`, `j` (or a canvas pixel x, y, which is turned into its cell; get_tile with x, y also reports the front-most visible tile `seen`), grid lists cells (rows = j, columns = i) and `offset` gets or sets the layer's grid offset, which is how layers at other elevations are placed (a ledge half a cell up is the floor's offset minus cell_h / 2 in y). The terrain tools and terrain_paint work on iso layers (modes sides and blob; canvas pixel points are mapped to cells)."
         ),
         tool!(
             "Tilemaps",
@@ -43,7 +43,7 @@ pub fn tools() -> Vec<ToolDef> {
             CHANGE,
             TerrainArgs,
             terrain,
-            "Set up terrain auto-tiling on a tilemap layer (Godot-compatible peering). Modes: sides (16 tiles, N E S W), blob (47 tiles, sides + corners), corners (dual grid, 4 corners). Actions: create (first terrain + mode), set_mode, add / remove (alias: delete) / edit / move (terrain priority), list, generate_template (append a labeled template tileset for the mode; reduced = only flip/rotation representatives), assign_masks (give tiles 1.. the template's masks in order), set_tile (a tile's mask / terrain / peers / symmetry / weight), get_tile, set_options (edge_same, seed), rebuild (recompute every cell), clear_overrides, missing (cells that had no matching tile, read-only report). Paint with terrain_paint."
+            "Set up terrain auto-tiling on a tilemap layer (Godot-compatible peering). Modes: sides (16 tiles, N E S W), blob (47 tiles, sides + corners), corners (dual grid, 4 corners). Actions: create (first terrain + mode), set_mode, add / remove (alias: delete) / edit / move (terrain priority), list, generate_template (append a labeled template tileset for the mode; reduced = only flip/rotation representatives), assign_masks (give tiles 1.. the template's masks in order), set_tile (a tile's mask / terrain / peers / symmetry / weight), get_tile, set_options (edge_same, seed), rebuild (recompute every cell), clear_overrides, missing (cells that had no matching tile, read-only report). Paint with terrain_paint. Works on isometric tilemap layers too (modes sides and blob; the dual-grid corners mode needs square tiles; generate_template draws diamond-shaped templates at the tiles' pivots)."
         ),
         tool!(
             "Tilemaps",
@@ -52,7 +52,7 @@ pub fn tools() -> Vec<ToolDef> {
             ADD,
             PaintArgs,
             terrain_paint,
-            "The terrain brush: paint terrain with the auto-tiling brush on a tilemap layer (the right tiles are chosen from the masks): paint (canvas pixel `points`, optional brush_size/round/mirror), rect (x, y, w, h), flood (fill the connected area at x, y), erase (paint terrain 0), override (force `tile` at x, y; 0 removes the override), pick (read the terrain at x, y). One undo step per call."
+            "The terrain brush: paint terrain with the auto-tiling brush on a tilemap layer (the right tiles are chosen from the masks): paint (canvas pixel `points`, optional brush_size/round/mirror), rect (x, y, w, h), flood (fill the connected area at x, y), erase (paint terrain 0), override (force `tile` at x, y; 0 removes the override), pick (read the terrain at x, y). One undo step per call. On isometric layers the canvas pixel positions are mapped to diamond cells through the layer's grid offset."
         ),
     ]
 }
@@ -65,6 +65,13 @@ fn ts_info(d: &DocEntry, t: u32) -> Value {
 #[serde(rename_all = "snake_case")]
 pub enum TilesetAction {
     List,
+    /// Isometric tilesets: make a tileset isometric (or square again).
+    SetIso,
+    GetPivot,
+    SetPivot,
+    ClearPivot,
+    Pivots,
+    TextureOrigin,
     Image,
     GetTile,
     SetTile,
@@ -97,6 +104,62 @@ pub struct TilesetArgs {
     pub path: Option<String>,
     /// image: integer upscale (default auto).
     pub scale: Option<u32>,
+    /// set_iso: diamond cell width in pixels (even; 0 makes the tileset square again).
+    pub cell_w: Option<u32>,
+    /// set_iso: diamond cell height in pixels (default cell_w / 2).
+    pub cell_h: Option<u32>,
+    /// set_pivot: [x, y] point of the tile image, from its top-left corner, that sits on the center of the diamond.
+    pub pivot: Option<[i32; 2]>,
+}
+
+fn require_iso(d: &DocEntry, ts: u32) -> R<()> {
+    if unsafe { tm::pixmith_tileset_is_iso(d.doc.raw(), ts) } {
+        Ok(())
+    } else {
+        Err(format!(
+            "tileset {ts} is not isometric; make it so with tileset action set_iso {{cell_w, cell_h}} or create an isometric layer with tilemap add_layer cell_w"
+        ))
+    }
+}
+
+/// Pivot and Godot texture origin of one tile of an isometric tileset.
+fn pivot_json(d: &DocEntry, ts: u32, tile: u32) -> R<Value> {
+    let raw = d.doc.raw();
+    let (mut p, mut o) = ([0i32; 2], [0i32; 2]);
+    if !unsafe { tm::pixmith_tile_pivot(raw, ts, tile, p.as_mut_ptr()) }
+        || !unsafe { tm::pixmith_tile_texture_origin(raw, ts, tile, o.as_mut_ptr()) }
+    {
+        return Err(format!("tile {tile} has no pivot (tile 0 is the empty tile)"));
+    }
+    Ok(json!({
+        "tile": tile, "pivot": p, "texture_origin": o,
+        "custom": unsafe { tm::pixmith_tile_pivot_is_set(raw, ts, tile) },
+    }))
+}
+
+/// The isometric grid of a tilemap layer: diamond cell size and the offset of cell (0, 0)'s box (null on square layers).
+pub fn layer_iso_json(d: &DocEntry, layer: u32) -> Value {
+    let raw = d.doc.raw();
+    if !unsafe { tm::pixmith_layer_is_iso(raw, layer) } {
+        return Value::Null;
+    }
+    let ts = unsafe { tm::pixmith_layer_tileset(raw, layer) }.max(0) as u32;
+    let (mut cell, mut off) = ([0u32; 2], [0i32; 2]);
+    unsafe {
+        tm::pixmith_tileset_iso_cell(raw, ts, cell.as_mut_ptr());
+        tm::pixmith_layer_grid_offset(raw, layer, off.as_mut_ptr());
+    }
+    json!({ "cell_w": cell[0], "cell_h": cell[1], "layout": "diamond_down", "offset": off })
+}
+
+/// The shape of a tileset: its diamond cell when isometric.
+pub fn tileset_iso_json(d: &DocEntry, ts: u32) -> Value {
+    let mut cell = [0u32; 2];
+    if unsafe { tm::pixmith_tileset_iso_cell(d.doc.raw(), ts, cell.as_mut_ptr()) } {
+        json!({ "cell_w": cell[0], "cell_h": cell[1], "layout": "diamond_down" })
+    } else {
+        Value::Null
+    }
 }
 
 fn default_tileset(d: &DocEntry, r: &Option<Ref>) -> R<u32> {
@@ -286,6 +349,52 @@ fn tileset(e: &mut Engine, a: TilesetArgs) -> R<Out> {
                     .ok_or_else(|| fail("could not rename"))
             })?;
         }
+        TilesetAction::SetIso => {
+            let cw = need(a.cell_w, "cell_w", &act)?;
+            let ch = if cw == 0 { 0 } else { a.cell_h.unwrap_or((cw / 2).max(1)) };
+            d.edit("Tileset Shape", Undo::Step, |_| {
+                unsafe { tm::pixmith_tileset_set_iso(raw, ts, cw, ch) }.then_some(()).ok_or_else(|| {
+                    fail("could not change the tileset's shape (it works only while no layer shows a tile of it)")
+                })
+            })?;
+        }
+        TilesetAction::GetPivot | TilesetAction::TextureOrigin if a.tile.is_some() => {
+            require_iso(d, ts)?;
+            extra = pivot_json(d, ts, tile(a.tile)?)?;
+        }
+        TilesetAction::GetPivot => return Err("action `get_pivot` needs `tile`".into()),
+        TilesetAction::SetPivot => {
+            require_iso(d, ts)?;
+            let t = tile(a.tile)?;
+            if t == 0 {
+                return Err("tile 0 is the empty tile and has no pivot".into());
+            }
+            let [x, y] = need(a.pivot, "pivot", &act)?;
+            d.edit("Set Tile Pivot", Undo::Step, |_| {
+                unsafe { tm::pixmith_tile_set_pivot(raw, ts, t, x, y) }
+                    .then_some(())
+                    .ok_or_else(|| fail("could not set the pivot (tile 0 has none)"))
+            })?;
+            extra = pivot_json(d, ts, t)?;
+        }
+        TilesetAction::ClearPivot => {
+            require_iso(d, ts)?;
+            let t = tile(a.tile)?;
+            if t == 0 {
+                return Err("tile 0 is the empty tile and has no pivot".into());
+            }
+            d.edit("Reset Tile Pivot", Undo::Step, |_| {
+                unsafe { tm::pixmith_tile_clear_pivot(raw, ts, t) }
+                    .then_some(())
+                    .ok_or_else(|| fail("could not reset the pivot"))
+            })?;
+            extra = pivot_json(d, ts, t)?;
+        }
+        TilesetAction::Pivots | TilesetAction::TextureOrigin => {
+            require_iso(d, ts)?;
+            let all = (1..count.min(1001)).map(|t| pivot_json(d, ts, t)).collect::<R<Vec<_>>>()?;
+            extra = json!({ "pivots": all, "note": "pivot = point of the tile image (from its top-left) on the diamond's center; texture_origin = Godot's offset from the image center; custom = set with set_pivot" });
+        }
         TilesetAction::SetBaseIndex => {
             let b = need(a.base_index, "base_index", &act)?;
             d.edit("Tileset Base Index", Undo::Step, |_| {
@@ -311,6 +420,15 @@ pub enum TilemapAction {
     Stamp,
     GetTile,
     Grid,
+    /// Isometric layers: get or set the grid offset.
+    Offset,
+}
+
+#[derive(Deserialize, JsonSchema, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum IsoLayout {
+    /// Godot TILE_LAYOUT_DIAMOND_DOWN (the only layout).
+    DiamondDown,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -344,6 +462,18 @@ pub struct TilemapArgs {
     pub region: Option<Rect>,
     /// add_layer: name of the new layer.
     pub name: Option<String>,
+    /// add_layer: makes an ISOMETRIC layer: the diamond cell width in pixels (even; e.g. 96). Default tile_width = cell_w.
+    pub cell_w: Option<u32>,
+    /// add_layer (iso): the diamond cell height (default cell_w / 2). Default tile_height = cell_h.
+    pub cell_h: Option<u32>,
+    /// add_layer (iso): the cell layout (only diamond_down).
+    pub layout: Option<IsoLayout>,
+    /// add_layer (iso) / offset: [x, y] canvas pixel of cell (0, 0)'s bounding box (default [0, 0]); offset without it reads the offset.
+    pub offset: Option<[i32; 2]>,
+    /// stamp/get_tile: the cell column i (with j) instead of a canvas pixel; on iso layers cell (i, j) is the diamond at offset + ((i - j) * cell_w / 2, (i + j) * cell_h / 2).
+    pub i: Option<i32>,
+    /// stamp/get_tile: the cell row j (with i).
+    pub j: Option<i32>,
 }
 
 fn decode_tile(v: u32) -> Value {
@@ -360,11 +490,30 @@ fn tilemap(e: &mut Engine, a: TilemapArgs) -> R<Out> {
     match a.action {
         TilemapAction::AddLayer => {
             let above = d.layer(&a.layer)?;
-            let tw = need(a.tile_width, "tile_width", &act)?.clamp(1, 1024);
-            let th = a.tile_height.unwrap_or(tw).clamp(1, 1024);
+            let iso = match a.cell_w {
+                Some(cw) if cw >= 2 => Some((cw, a.cell_h.unwrap_or((cw / 2).max(1)).max(1))),
+                Some(_) => return Err("cell_w must be at least 2".into()),
+                None if a.cell_h.is_some() || a.offset.is_some() || a.layout.is_some() => {
+                    return Err("cell_h, offset and layout belong to an isometric layer: give cell_w too".into());
+                }
+                None => None,
+            };
+            let tw = match (a.tile_width, iso) {
+                (Some(w), _) => w,
+                (None, Some((cw, _))) => cw,
+                (None, None) => need(a.tile_width, "tile_width", &act)?,
+            }
+            .clamp(1, 1024);
+            let th = a.tile_height.unwrap_or(iso.map_or(tw, |(_, ch)| ch)).clamp(1, 1024);
             let name = a.name.clone();
+            let off = a.offset.unwrap_or([0, 0]);
             let l = d.edit("New Tilemap Layer", Undo::Step, |_| {
-                let l = unsafe { tm::pixmith_add_tilemap_layer(raw, above, tw, th) };
+                let l = match iso {
+                    Some((cw, ch)) => unsafe {
+                        tm::pixmith_add_iso_tilemap_layer(raw, above, tw, th, cw, ch, off[0], off[1])
+                    },
+                    None => unsafe { tm::pixmith_add_tilemap_layer(raw, above, tw, th) },
+                };
                 if let Some(n) = &name {
                     let c = cstr(n);
                     unsafe { pixmith_core::ffi::document::pixmith_rename_layer(raw, l, c.as_ptr()) };
@@ -374,6 +523,7 @@ fn tilemap(e: &mut Engine, a: TilemapArgs) -> R<Out> {
             d.layer = l;
             out["layer"] = json!(l);
             out["tileset"] = json!(unsafe { tm::pixmith_layer_tileset(raw, l) });
+            out["tile_size"] = json!([tw, th]);
         }
         TilemapAction::Convert => {
             let l = d.image_layer(&a.layer)?;
@@ -407,31 +557,67 @@ fn tilemap(e: &mut Engine, a: TilemapArgs) -> R<Out> {
         }
         TilemapAction::Stamp => {
             let l = d.tilemap_layer(&a.layer)?;
-            let (x, y) = (need(a.x, "x", &act)?, need(a.y, "y", &act)?);
+            let at = Place::of(d, l, &a)?;
             let t = need(a.tile, "tile", &act)?;
             let ts = unsafe { tm::pixmith_layer_tileset(raw, l) }.max(0) as u32;
             let count = unsafe { tm::pixmith_tileset_tile_count(raw, ts) };
             if t >= count {
                 return Err(format!("tile {t} does not exist (tileset {ts} has tiles 0-{})", count.saturating_sub(1)));
             }
+            let diagonal = a.diagonal.unwrap_or(false);
+            if diagonal && at.iso {
+                return Err("the diagonal flip does not exist for isometric tiles".into());
+            }
             let v = t
                 | if a.flip_x.unwrap_or(false) { 0x8000_0000 } else { 0 }
                 | if a.flip_y.unwrap_or(false) { 0x4000_0000 } else { 0 }
-                | if a.diagonal.unwrap_or(false) { 0x2000_0000 } else { 0 };
+                | if diagonal { 0x2000_0000 } else { 0 };
             d.edit("Stamp Tile", Undo::Step, |_| {
-                unsafe { tm::pixmith_tile_stamp(raw, l, f, x, y, v) }
-                    .then_some(())
-                    .ok_or_else(|| fail(format!("could not stamp at ({x}, {y}) (outside the map?)")))
+                let ok = match at.cell {
+                    Some((i, j)) => unsafe { tm::pixmith_tile_stamp_cell(raw, l, f, i, j, v) },
+                    None => unsafe { tm::pixmith_tile_stamp(raw, l, f, at.x, at.y, v) },
+                };
+                ok.then_some(()).ok_or_else(|| fail(format!("could not stamp at {} (outside the map?)", at.describe())))
             })?;
-            out["cell"] = decode_tile(unsafe { tm::pixmith_tile_at(raw, l, f, x, y) });
+            out["layer"] = json!(l);
+            out["cell"] = at.read(raw, l, f);
         }
         TilemapAction::GetTile => {
             let l = d.tilemap_layer(&a.layer)?;
-            let (x, y) = (need(a.x, "x", &act)?, need(a.y, "y", &act)?);
-            out["cell"] = decode_tile(unsafe { tm::pixmith_tile_at(raw, l, f, x, y) });
+            let at = Place::of(d, l, &a)?;
+            out["layer"] = json!(l);
+            out["cell"] = at.read(raw, l, f);
+            if at.iso && a.i.is_none() {
+                let mut hit = [0i32; 3];
+                out["seen"] = if unsafe { tm::pixmith_tile_hit_at(raw, l, f, at.x, at.y, hit.as_mut_ptr()) } {
+                    let mut c = decode_tile(hit[2] as u32);
+                    c["i"] = json!(hit[0]);
+                    c["j"] = json!(hit[1]);
+                    c
+                } else {
+                    Value::Null
+                };
+            }
+        }
+        TilemapAction::Offset => {
+            let l = d.tilemap_layer(&a.layer)?;
+            if !unsafe { tm::pixmith_layer_is_iso(raw, l) } {
+                return Err(format!("layer {l} is not an isometric tilemap layer, so it has no grid offset"));
+            }
+            if let Some([x, y]) = a.offset {
+                d.edit("Move Isometric Grid", Undo::Step, |_| {
+                    unsafe { tm::pixmith_layer_set_grid_offset(raw, l, x, y) }
+                        .then_some(())
+                        .ok_or_else(|| fail("could not move the grid (offsets are limited to +-16777216 pixels)"))
+                })?;
+            }
+            out["layer"] = json!(l);
         }
         TilemapAction::Grid => {
             let l = d.tilemap_layer(&a.layer)?;
+            if unsafe { tm::pixmith_layer_is_iso(raw, l) } {
+                return iso_grid_out(d, l, f, a.region, out);
+            }
             let ts = unsafe { tm::pixmith_layer_tileset(raw, l) }.max(0) as u32;
             let (tw, th) = unsafe {
                 (tm::pixmith_tileset_tile_width(raw, ts) as i32, tm::pixmith_tileset_tile_height(raw, ts) as i32)
@@ -468,6 +654,124 @@ fn tilemap(e: &mut Engine, a: TilemapArgs) -> R<Out> {
             out["legend"] = json!("tile index per cell, 0 = empty, * = flipped");
         }
     }
+    if let Some(l) = out["layer"].as_u64() {
+        let iso = layer_iso_json(d, l as u32);
+        if !iso.is_null() {
+            out["iso"] = iso;
+        }
+    }
+    Out::json(out)
+}
+
+/// Where a stamp or lookup lands: a canvas pixel on square layers, a cell (or the cell under a pixel) on iso layers.
+struct Place {
+    iso: bool,
+    /// The cell on iso layers.
+    cell: Option<(i32, i32)>,
+    x: i32,
+    y: i32,
+}
+
+impl Place {
+    fn of(d: &DocEntry, l: u32, a: &TilemapArgs) -> R<Place> {
+        let raw = d.doc.raw();
+        let iso = unsafe { tm::pixmith_layer_is_iso(raw, l) };
+        match (a.i, a.j, a.x, a.y) {
+            (Some(i), Some(j), None, None) => {
+                if iso {
+                    let mut o = [0i32; 2];
+                    unsafe { tm::pixmith_layer_cell_origin(raw, l, i, j, o.as_mut_ptr()) };
+                    return Ok(Place { iso, cell: Some((i, j)), x: o[0], y: o[1] });
+                }
+                let ts = unsafe { tm::pixmith_layer_tileset(raw, l) }.max(0) as u32;
+                let (tw, th) = unsafe {
+                    (tm::pixmith_tileset_tile_width(raw, ts) as i32, tm::pixmith_tileset_tile_height(raw, ts) as i32)
+                };
+                Ok(Place { iso, cell: None, x: i.saturating_mul(tw), y: j.saturating_mul(th) })
+            }
+            (None, None, Some(x), Some(y)) => {
+                if iso {
+                    let mut c = [0i32; 2];
+                    unsafe { tm::pixmith_layer_cell_at(raw, l, x, y, c.as_mut_ptr()) };
+                    return Ok(Place { iso, cell: Some((c[0], c[1])), x, y });
+                }
+                Ok(Place { iso, cell: None, x, y })
+            }
+            _ => Err(if iso {
+                "isometric layers need the cell `i` and `j` (or a canvas pixel `x` and `y`)".into()
+            } else {
+                "give the canvas pixel `x` and `y` (or the cell `i` and `j`)".to_string()
+            }),
+        }
+    }
+
+    fn describe(&self) -> String {
+        match self.cell {
+            Some((i, j)) => format!("cell ({i}, {j})"),
+            None => format!("({}, {})", self.x, self.y),
+        }
+    }
+
+    fn read(&self, raw: *mut pixmith_core::Editor, l: u32, f: u32) -> Value {
+        match self.cell {
+            Some((i, j)) => {
+                let mut c = decode_tile(unsafe { tm::pixmith_tile_in_cell(raw, l, f, i, j) });
+                c["i"] = json!(i);
+                c["j"] = json!(j);
+                c
+            }
+            None => decode_tile(unsafe { tm::pixmith_tile_at(raw, l, f, self.x, self.y) }),
+        }
+    }
+}
+
+/// `tilemap grid` on an isometric layer: the tile of every cell of the layer's grid (rows = j, columns = i).
+fn iso_grid_out(d: &DocEntry, l: u32, f: u32, region: Option<Rect>, mut out: Value) -> R<Out> {
+    let raw = d.doc.raw();
+    let sprite = d.doc.sprite();
+    let grid = sprite
+        .cels
+        .get(f as usize)
+        .and_then(|r| r.get(l as usize))
+        .and_then(|c| c.as_ref())
+        .and_then(|c| c.tiles.as_ref());
+    // The cells to list: those of the grid, or the cells under the corners of `region`.
+    let (i0, j0, i1, j1) = match (region, grid) {
+        (Some(r), _) => {
+            let mut c = [[0i32; 2]; 4];
+            let (x1, y1) = (r.x + r.w as i32 - 1, r.y + r.h as i32 - 1);
+            for (k, (x, y)) in [(r.x, r.y), (x1, r.y), (r.x, y1), (x1, y1)].into_iter().enumerate() {
+                unsafe { tm::pixmith_layer_cell_at(raw, l, x, y, c[k].as_mut_ptr()) };
+            }
+            (
+                c.iter().map(|p| p[0]).min().unwrap_or(0),
+                c.iter().map(|p| p[1]).min().unwrap_or(0),
+                c.iter().map(|p| p[0]).max().unwrap_or(0),
+                c.iter().map(|p| p[1]).max().unwrap_or(0),
+            )
+        }
+        (None, Some(g)) if g.w > 0 && g.h > 0 => (g.x, g.y, g.x + g.w as i32 - 1, g.y + g.h as i32 - 1),
+        _ => (0, 0, -1, -1),
+    };
+    let mut rows = Vec::new();
+    for j in j0..=j1.min(j0.saturating_add(255)) {
+        let row: Vec<String> = (i0..=i1.min(i0.saturating_add(255)))
+            .map(|i| {
+                let v = unsafe { tm::pixmith_tile_in_cell(raw, l, f, i, j) };
+                format!("{}{}", v & 0x1FFF_FFFF, if v & 0xE000_0000 != 0 { "*" } else { "" })
+            })
+            .collect();
+        rows.push(row.join(" "));
+    }
+    let ts = unsafe { tm::pixmith_layer_tileset(raw, l) }.max(0) as u32;
+    out["layer"] = json!(l);
+    out["tile_size"] = json!([unsafe { tm::pixmith_tileset_tile_width(raw, ts) }, unsafe {
+        tm::pixmith_tileset_tile_height(raw, ts)
+    }]);
+    out["iso"] = layer_iso_json(d, l);
+    out["first_cell"] = json!([i0, j0]);
+    out["rows"] = json!(rows);
+    out["legend"] = json!("tile index per cell (i = column, j = row), 0 = empty, * = flipped");
     Out::json(out)
 }
 

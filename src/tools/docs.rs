@@ -8,7 +8,7 @@ use crate::paths::show;
 use pixmith_core::document::{color_mode as cm, layers as lf, slices as sf, tilemap as tm};
 use pixmith_core::ffi::document as core;
 use pixmith_core::formats::{animation, import, sheet_import};
-use pixmith_core::gamedev::{autotile, tween};
+use pixmith_core::gamedev::{autotile, rig, tween};
 use pixmith_core::history;
 use pixmith_core::paint::{selection as sel, transform as xf};
 use pixmith_core::palette::presets;
@@ -35,7 +35,7 @@ pub fn tools() -> Vec<ToolDef> {
             OPEN_FILES,
             OpenArgs,
             doc_open,
-            "Open a file as a new document and return its id plus a summary. Reads Pixmith documents (.pxmt) and Aseprite files (.aseprite/.ase), and imports PNG (one frame), animated GIF (frames + delays), a sprite sheet PNG cut into a grid (give cell_width/cell_height), or a sprite sheet with Aseprite JSON metadata (pass the .json; the PNG named in meta.image is used unless png_path is given). Imported documents have no .pxmt path yet; doc_save without `path` saves them next to the imported file (same name, .pxmt)."
+            "Open a file as a new document and return its id plus a summary. Reads Pixmith documents (.pxmt) and Aseprite files (.aseprite/.ase), and imports PNG (one frame), animated GIF (frames + delays), a sprite sheet PNG cut into a grid (give cell_width/cell_height), or a sprite sheet with Aseprite JSON metadata (pass the .json; the PNG named in meta.image is used unless png_path is given), or, with format=trace_grid (File > Import > Trace Pixel Art…), the first image of a file (PNG, JPEG, WebP, ...) traced onto its real pixel grid: \"pseudo-pixel\" art from AI image tools becomes real pixel art (options pitch auto|n|[x, y], colors, remove_background, shadow, tolerance, global, background_color, close_outline, crop, seed; the result's `trace` has pitch, phase, palette, quality). Imported documents have no .pxmt path yet; doc_save without `path` saves them next to the imported file (same name, .pxmt)."
         ),
         tool!(
             "Documents",
@@ -71,7 +71,7 @@ pub fn tools() -> Vec<ToolDef> {
             READ,
             InfoArgs,
             doc_info,
-            "Everything about a document: size, color mode, layer tree (index 0 = bottom; kind image/group/tilemap, visibility, opacity, blend mode, tileset, tween/terrain data, user data), frames and durations, which cels have pixels or are linked, tags, palette, slices, tilesets, sprite user data, selection, free-transform/floating state, undo history size and the active layer/frame defaults. Use `sections` to fetch only parts of it."
+            "Everything about a document: size, color mode, layer tree (index 0 = bottom; kind image/group/tilemap, visibility, opacity, blend mode, tileset, iso grid and offset of isometric tilemaps, tween parent/terrain data, user data), frames and durations, which cels have pixels or are linked, tags, palette, slices, tilesets, sprite user data, selection, free-transform/floating state, undo history size and the active layer/frame defaults. Use `sections` to fetch only parts of it."
         ),
         tool!(
             "Documents",
@@ -210,11 +210,13 @@ pub enum OpenFormat {
     Gif,
     SheetGrid,
     SheetJson,
+    /// File > Import > Trace Pixel Art…: pseudo-pixel art (AI image tools) traced onto its real pixel grid.
+    TraceGrid,
 }
 
 #[derive(Deserialize, JsonSchema)]
 pub struct OpenArgs {
-    /// File to open: .pxmt, .aseprite, .ase, .png, .gif, or a sprite-sheet .json (Aseprite format).
+    /// File to open: .pxmt, .aseprite, .ase, .png, .gif, or a sprite-sheet .json (Aseprite format); with format trace_grid any image.
     pub path: String,
     /// How to read it (default auto: by extension; .png with cell_width becomes sheet_grid). native = .pxmt/.aseprite/.ase.
     pub format: Option<OpenFormat>,
@@ -226,6 +228,56 @@ pub struct OpenArgs {
     pub png_path: Option<String>,
     /// Where to open it when the Pixmith app is connected: "app" (default; a tab of the app) or "headless".
     pub target: Option<Target>,
+    /// trace_grid: cell size in source pixels: "auto" (default), a number such as 6.5, or [x, y].
+    pub pitch: Option<super::cleanup::PitchArg>,
+    /// trace_grid, pitch auto: smallest and largest cell size searched (default 3 and 32).
+    pub min_pitch: Option<f64>,
+    pub max_pitch: Option<f64>,
+    /// trace_grid: [x, y] offset of the first cell edge (default: detected).
+    pub phase: Option<[f64; 2]>,
+    /// trace_grid: find the x and y pitch independently.
+    pub separate_axes: Option<bool>,
+    /// trace_grid: palette: a count, "auto" (default), "keep" or a list of colors.
+    pub colors: Option<super::cleanup::ColorsArg>,
+    /// trace_grid: remove the background (also on when tolerance, shadow, global or background_color is given).
+    pub remove_background: Option<bool>,
+    /// trace_grid, remove_background: per-channel tolerance 0-255 (default 28).
+    pub tolerance: Option<u32>,
+    /// trace_grid, remove_background: also remove a soft drop shadow.
+    pub shadow: Option<bool>,
+    /// trace_grid, remove_background: also remove enclosed background-colored pixels.
+    pub global: Option<bool>,
+    /// trace_grid, remove_background: the background color (default: the dominant border color).
+    pub background_color: Option<Color>,
+    /// trace_grid: close 1 px breaks in the dark outer outline.
+    pub close_outline: Option<bool>,
+    /// trace_grid: crop to the opaque cells (default true).
+    pub crop: Option<bool>,
+    /// trace_grid: k-means seed (default 1).
+    pub seed: Option<u64>,
+}
+
+impl OpenArgs {
+    /// The trace options of format trace_grid.
+    pub fn trace_opts(&self) -> super::cleanup::TraceOpts {
+        super::cleanup::TraceOpts {
+            pitch: self.pitch.clone(),
+            min_pitch: self.min_pitch,
+            max_pitch: self.max_pitch,
+            phase: self.phase,
+            separate_axes: self.separate_axes,
+            colors: self.colors.clone(),
+            remove_background: self.remove_background,
+            tolerance: self.tolerance,
+            shadow: self.shadow,
+            global: self.global,
+            background_color: self.background_color,
+            close_outline: self.close_outline,
+            crop: self.crop,
+            seed: self.seed,
+            ..Default::default()
+        }
+    }
 }
 
 /// How `doc_open` reads a file with this (lower-case) extension.
@@ -255,7 +307,14 @@ pub fn doc_open(e: &mut Engine, a: OpenArgs) -> R<Out> {
     let c = cstr(&path.to_string_lossy());
     clear_error();
     let what = format!("could not open {}", a.path);
+    let mut trace = None;
     let (doc, native) = match format {
+        OpenFormat::TraceGrid => {
+            let (doc, report) = super::cleanup::open_traced(&path.to_string_lossy(), &a.trace_opts())
+                .map_err(|m| format!("{}: {m}", a.path))?;
+            trace = Some(report);
+            (doc, false)
+        }
         OpenFormat::Native | OpenFormat::Auto => (Doc::adopt(unsafe { core::pixmith_open(c.as_ptr()) }, &what)?, true),
         OpenFormat::Png => (Doc::adopt(unsafe { import::pixmith_import_png(c.as_ptr()) }, &what)?, false),
         OpenFormat::Gif => (Doc::adopt(unsafe { animation::pixmith_import_gif(c.as_ptr()) }, &what)?, false),
@@ -278,7 +337,11 @@ pub fn doc_open(e: &mut Engine, a: OpenArgs) -> R<Out> {
     let id = e.add(doc, name, p, src);
     let entry = e.doc(&Some(id))?;
     entry.doc.mark_saved();
-    Out::json(summary(entry))
+    let mut v = summary(entry);
+    if let Some(t) = trace {
+        v["trace"] = t;
+    }
+    Out::json(v)
 }
 
 /// The image a sprite-sheet JSON names in `meta.image`, resolved next to the JSON and checked against the root.
@@ -593,6 +656,14 @@ pub fn layers_json(d: &DocEntry) -> Vec<Value> {
                 if mode >= 0 {
                     m.insert("terrain_mode".into(), json!(super::tilemap::TERRAIN_MODES[mode as usize % 3]));
                 }
+                let iso = super::tilemap::layer_iso_json(d, i);
+                if !iso.is_null() {
+                    m.insert("iso".into(), iso);
+                }
+            }
+            let parent = unsafe { rig::pixmith_tween_get_parent(raw, i) };
+            if parent >= 0 {
+                m.insert("tween_parent".into(), json!(parent));
             }
             let tw = unsafe { tween::pixmith_tween_options(raw, i) };
             if tw & 1 != 0 {
@@ -686,6 +757,7 @@ pub fn tilesets_json(d: &DocEntry) -> Vec<Value> {
                 "tiles": unsafe { tm::pixmith_tileset_tile_count(raw, t) },
                 "base_index": unsafe { tm::pixmith_tileset_base_index(raw, t) },
                 "used_by_layers": users,
+                "iso": super::tilemap::tileset_iso_json(d, t),
             })
         })
         .collect()

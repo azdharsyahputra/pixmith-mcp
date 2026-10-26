@@ -9,6 +9,91 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
 pub mod mock_app;
 
+/// A 16x16 round figure on a 8.3 pixel grid with soft edges, noise, a white paper background and a grey shadow:
+/// the "pseudo-pixel" art of AI image tools. Returns (width, height, rgba) and the original sprite.
+pub fn pseudo_pixel() -> (usize, usize, Vec<u8>, Vec<[u8; 4]>) {
+    const N: usize = 16;
+    const PITCH: f64 = 8.3;
+    const ORIGIN: (f64, f64) = (14.4, 9.7);
+    let c = N as f64 / 2.0;
+    let inside = |x: i64, y: i64| {
+        x >= 0 && y >= 0 && x < N as i64 && y < N as i64 && {
+            let (dx, dy) = ((x as f64 + 0.5 - c) / c, (y as f64 + 0.5 - c) / c);
+            dx * dx + dy * dy <= 1.0
+        }
+    };
+    let mut sprite = vec![[0u8; 4]; N * N];
+    for y in 0..N {
+        for x in 0..N {
+            if inside(x as i64, y as i64) {
+                let edge =
+                    [(1, 0), (-1, 0), (0, 1), (0, -1)].iter().any(|&(dx, dy)| !inside(x as i64 + dx, y as i64 + dy));
+                sprite[y * N + x] = if edge {
+                    [30, 28, 40, 255]
+                } else if y > N / 2 {
+                    [240, 190, 140, 255]
+                } else {
+                    [200, 60, 70, 255]
+                };
+            }
+        }
+    }
+    for (x, y) in [(5, 5), (6, 5), (9, 5), (10, 5), (5, 6), (10, 6)] {
+        sprite[y * N + x] = [255, 255, 255, 255];
+    }
+    let w = (ORIGIN.0 + N as f64 * PITCH + 2.5 * PITCH).ceil() as usize;
+    let h = (ORIGIN.1 + N as f64 * PITCH + 3.5 * PITCH).ceil() as usize;
+    let (scx, scy) = (ORIGIN.0 + N as f64 * PITCH / 2.0, ORIGIN.1 + N as f64 * PITCH + 0.3 * PITCH);
+    let mut img = vec![[255.0f64; 3]; w * h];
+    for y in 0..h {
+        for x in 0..w {
+            let (fx, fy) = (x as f64 + 0.5, y as f64 + 0.5);
+            let r2 = ((fx - scx) / (N as f64 * PITCH * 0.4)).powi(2) + ((fy - scy) / (1.6 * PITCH)).powi(2);
+            let mut col = if r2 < 1.0 { [150.0 + 105.0 * r2; 3] } else { [255.0; 3] };
+            let (cx, cy) = (((fx - ORIGIN.0) / PITCH).floor(), ((fy - ORIGIN.1) / PITCH).floor());
+            if cx >= 0.0 && cy >= 0.0 && (cx as usize) < N && (cy as usize) < N {
+                let p = sprite[cy as usize * N + cx as usize];
+                if p[3] != 0 {
+                    col = [p[0] as f64, p[1] as f64, p[2] as f64];
+                }
+            }
+            img[y * w + x] = col;
+        }
+    }
+    let blur = |src: &[[f64; 3]], horizontal: bool| -> Vec<[f64; 3]> {
+        let mut out = src.to_vec();
+        for y in 0..h {
+            for x in 0..w {
+                let at = |d: i64| {
+                    let (sx, sy) = if horizontal {
+                        ((x as i64 + d).clamp(0, w as i64 - 1), y as i64)
+                    } else {
+                        (x as i64, (y as i64 + d).clamp(0, h as i64 - 1))
+                    };
+                    src[sy as usize * w + sx as usize]
+                };
+                let (a, b, cc) = (at(-1), at(0), at(1));
+                out[y * w + x] = [0, 1, 2].map(|i| (a[i] + 2.0 * b[i] + cc[i]) / 4.0);
+            }
+        }
+        out
+    };
+    let img = blur(&blur(&img, true), false);
+    let mut seed = 0x2545_F491_4F6C_DD1Du64;
+    let mut rgba = Vec::with_capacity(w * h * 4);
+    for p in img {
+        for ch in p {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            let n = (seed % 13) as f64 - 6.0;
+            rgba.push((ch + n).round().clamp(0.0, 255.0) as u8);
+        }
+        rgba.push(255);
+    }
+    (w, h, rgba, sprite)
+}
+
 pub struct Client {
     child: Child,
     stdin: ChildStdin,

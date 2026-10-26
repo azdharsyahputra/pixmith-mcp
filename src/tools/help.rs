@@ -67,6 +67,11 @@ engine in-process; every tool call edits real documents with the same code the d
 - Tilemap: tilemap add_layer (tile size) -> draw tiles via tileset set_tile or by drawing on the layer ->
   tilemap stamp. Auto-tiling: terrain create (mode) -> terrain generate_template -> paint the template
   tiles -> terrain assign_masks -> terrain_paint paint/rect/flood -> terrain missing to check coverage.
+- Sprites traced from AI reference art: doc_open format=trace_grid (or trace on an open cel) puts pseudo-pixel art on a real
+  grid; filter remove_background / clean_edges tidy it; lint lists what is still wrong; frame_diff / render diff_prev find
+  walk-cycle parts that did not move; warp bends a cel without blur. Help topic cleanup.
+- Isometric maps: tilemap add_layer with cell_w, cell_h, offset (e.g. 96 x 48 at [592, 360]) -> tilemap stamp {i, j, tile} ->
+  tileset set_pivot for tall tiles -> terrain / terrain_paint -> export_godot_tileset (ISOMETRIC / DIAMOND_DOWN). Help topic tilemaps.
 - Godot: export_godot (project_root with project.godot, tres_path inside it; one animation per tag) and
   export_godot_tileset for tilesets with terrains. preview=true shows what would be written.
 - Godot Live Link (Pixmith app 0.5.1 or later): export_godot once with save_settings=true; then a running game with the
@@ -74,13 +79,15 @@ engine in-process; every tool call edits real documents with the same code the d
   returns a screenshot of that running game (scale 1-8 enlarges small pixel games) so you can check the result.
 - Replace one layer's pixels from a PNG in one undo step: layer action import_png with replace=true (path, layer, frame,
   optional x / y). More how-tos per tool group: help topics app_tools (the app's tool names), documents, layers, drawing, selection,
-  transform, filters, tilemaps, slices, tween, export, history, live.
+  transform, filters, cleanup, tilemaps, slices, tween, export, history, live.
 - Anything else: run_lua (see help topic lua_api); timeout_seconds (1-120) allows longer scripts.
 "##;
 
 const DOCUMENTS: &str = r##"# Documents (doc_new, doc_open, doc_save, doc_close, doc_list, doc_info, doc_set_active)
 - doc_new {width, height, name?, background?, color_mode?, palette_preset?}; doc_open {path} reads .pxmt / .aseprite and
   imports .png, .gif, sprite sheets (cell_width / cell_height) and Aseprite JSON sheets. Both return the document id.
+  doc_open {path, format: "trace_grid", pitch?, colors?, remove_background?, shadow?, close_outline?, crop?} (File > Import > Trace Pixel Art…)
+  traces pseudo-pixel art (AI image tools) onto its real grid into a new document; the result's `trace` has pitch, phase, palette, quality.
 - doc_save {path?, copy?, replace?}: .pxmt keeps everything, .aseprite / .ase for Aseprite; copy=true leaves the document as is.
   Without path an imported document (PNG, GIF, sheet) is saved next to the imported file as <name>.pxmt (the result says where).
   The app refuses to save to a file another tab has open: replace=true closes that tab first when it has no unsaved changes.
@@ -124,7 +131,9 @@ const SELECTION: &str = r##"# Selection and clipboard (select, iso_grid, clipboa
 - select {action}: rect (Marquee), polygon (Polygonal Lasso), lasso, wand (Magic Wand), by_color, iso_tile (Isometric Tile:
   x, y or col, row; tile_w / tile_h default 32 x 16; offset_x / offset_y), all, none, invert, expand, contract, border; mode replace / add /
   subtract. delete clears the selected pixels, move_pixels shifts them, crop crops the canvas to the selection.
-- iso_grid {action: get | set | reset, tile_w, tile_h, offset_x, offset_y}: the document's isometric grid, the default of select iso_tile.
+- iso_grid {action: get | set | reset, tile_w, tile_h, offset_x, offset_y, layer?}: the document's isometric grid, the default of select iso_tile.
+  With an isometric tilemap layer (tilemap add_layer cell_w) its grid IS the layer's (source "layer"): get reads it, set moves its offset,
+  and select iso_tile uses it by default; otherwise the server keeps a per-document setting (default 32 x 16 at 0, 0).
 - clipboard {action}: copy, cut, paste, paste_image (from a PNG file), move {dx, dy}, commit, cancel. A paste is a
   floating selection until committed; the next edit commits it too.
 - Drawing, fills, gradients and filters only touch selected pixels while a selection exists.
@@ -139,8 +148,25 @@ const TRANSFORM: &str = r##"# Transform (transform, free_transform, sprite_size)
 
 const FILTERS: &str = r##"# Filters (filter)
 - filter {kind, target: cel | layer | frame, region?}: replace_color, invert, desaturate, hsl, brightness_contrast,
-  color_balance, curves, outline, drop_shadow, remove_isolated_pixels, blur, sharpen. Limited to the selection or `region`.
+  color_balance, curves, outline, drop_shadow, remove_isolated_pixels, blur, sharpen, clean_edges (FX > Clean Edges…),
+  remove_background (FX > Remove Background…). Limited to the selection or `region`. See help topic cleanup.
 - preview=true returns an image of the result without changing the document.
+"##;
+
+const CLEANUP: &str = r##"# Cleanup of sprites made from reference art (lint, trace, filter clean_edges / remove_background, frame_diff, warp)
+- Trace pseudo-pixel art (AI image tools: soft upscaled edges, drifting grid, paper background, drop shadow) onto a real grid:
+  doc_open {path, format: "trace_grid", pitch: "auto" | 6.5 | [x, y], colors: 16 | "auto" | "keep" | [...], remove_background, shadow,
+  close_outline, crop} (File > Import > Trace Pixel Art…) or trace {…} on an open document's cel (every cel is resampled with the active
+  cel's grid so an animation stays on one grid; preview=true / detect_only=true change nothing). Results: pitch, phase, palette, quality (0-1).
+- filter {kind: "remove_background", tolerance?, shadow?, global?, color?} (FX > Remove Background…): flood fill from the border, equal colors enclosed by the figure stay.
+- filter {kind: "clean_edges", halo?, despeckle?, holes?, light_specks?, thin_outline?, thickness?} (FX > Clean Edges…): never removes interior detail
+  (eyes, 1 px highlights, fingers); name no pass for halo + despeckle + thin_outline, otherwise only the named ones run; target layer / frame widen it.
+- lint {target?, speck?, list?, palette?} (FX > Lint Sprite…): read-only per-cel report: light_edge, holes, specks, no_outline, strays,
+  semi_transparent, off_palette, each {count, items: [{x, y, size}]} (positions capped by `list`).
+- frame_diff {frame | frames | all, layer?, wrap?, image?} (View > Frame Difference): changed / appeared / disappeared / total / bounds /
+  reference_frame versus the previous frame; render {diff_prev: true, diff_opacity?, diff_wrap?, diff_layer?} tints those pixels over the render.
+- warp {grid: [cols, rows], offsets: [[dx, dy], ...], samples?, smooth?, pins?, preview?} (Edit > Warp…): a puppet / mesh warp of the cel (selection-aware),
+  resampled by majority vote so nothing blurs and no color is invented.
 "##;
 
 const TILEMAPS: &str = r##"# Tilemaps and terrain (tileset, tilemap, terrain, terrain_paint)
@@ -152,6 +178,15 @@ const TILEMAPS: &str = r##"# Tilemaps and terrain (tileset, tilemap, terrain, te
   assign_masks -> terrain_paint {paint | rect | flood | erase | override | pick} -> terrain missing must report none.
 - terrain {action}: create, set_mode, add, remove (alias delete), edit, move, list, set_tile, get_tile, set_options,
   rebuild, clear_overrides, missing.
+- Tilemap iso (isometric, 2:1 Godot DIAMOND_DOWN): tilemap {action: "add_layer", cell_w: 96, cell_h: 48, offset: [592, 360]} creates an
+  isometric layer + tileset (tile images default to the cell size; give tile_width / tile_height for taller tiles). Cell (i, j) has its box at
+  (offset_x + (i - j) * cell_w / 2, offset_y + (i + j) * cell_h / 2); i runs down-right, j down-left; cells draw back to front.
+  tilemap stamp {i, j, tile, flip_x?, flip_y?} and get_tile {i, j} (or a canvas pixel x, y; get_tile then also gives `seen`, the front-most
+  visible tile), grid (rows = j, columns = i), offset {offset?: [x, y]} reads or moves the layer's grid (layers at other elevations).
+  tileset {action: set_iso {cell_w, cell_h} | get_pivot | set_pivot {tile, pivot: [x, y]} | clear_pivot | pivots | texture_origin}: the pivot
+  is the point of a tall tile's image that sits on the diamond's center (default: centered, bottom-aligned); texture_origin is Godot's value.
+  terrain / terrain_paint work on iso layers (sides, blob). iso_grid and select iso_tile share the layer's grid. export_godot_tileset writes
+  the isometric TileSet (and, with write_scene, the map with each layer's offset).
 "##;
 
 const SLICES: &str = r##"# Slices (slice, user_data)
@@ -169,6 +204,8 @@ const TWEEN: &str = r##"# Tweening (tween)
 - Keys on a layer (or group) for x, y, rotation, scale_x, scale_y, opacity; the layer renders and exports animated.
 - tween {action}: set_key / set_keys {frame, values}, remove_key (alias delete_key), move_key, set_ease, set_pivot,
   reset_pivot, set_options, copy_keys / paste_keys, info, bake / bake_all (turn the motion into editable cels).
+- Rig (Tween Parent): tween {action: set_parent {layer, parent} | clear_parent | get_parent | children | composed_transform {frame}}: a child's
+  transform is its parent's composed with its own about its own pivot (thigh -> shin -> boot, body -> arm). bake / bake_all are rig-aware.
 - Eases: linear, hold, in_quad, out_quad, in_out_quad, in_out_cubic, out_back, out_bounce, bezier [x1, y1, x2, y2].
 "##;
 
@@ -206,7 +243,7 @@ Each line: what the app calls it -> the MCP call (example). Coordinates are canv
 - Lasso -> select {action: "lasso", points: [[2,2],[9,3],[5,9]]}
 - Polygonal Lasso -> select {action: "polygon", points: [[2,2],[9,3],[5,9]]}
 - Magic Wand -> select {action: "wand", x: 4, y: 4, tolerance: 0, contiguous: true}; Select by Color -> select {action: "by_color", x, y}
-- Select > Isometric Tile -> select {action: "iso_tile", x: 32, y: 16} or {col: 1, row: 0}; the grid is the document's iso_grid {action: "set", tile_w: 96, tile_h: 48, offset_x: 592, offset_y: 360} (default 32 x 16 at 0, 0; kept by this server per document, not read from the app), or pass tile_w / tile_h / offset_x / offset_y to one call
+- Select > Isometric Tile -> select {action: "iso_tile", x: 32, y: 16} or {col: 1, row: 0}; the grid is the active isometric tilemap layer's (cell size and offset) when there is one, else the document's iso_grid {action: "set", tile_w: 96, tile_h: 48, offset_x: 592, offset_y: 360} (default 32 x 16 at 0, 0; kept by this server per document, not read from the app), or pass tile_w / tile_h / offset_x / offset_y to one call
 - Add / subtract with Shift / Alt -> mode: "add" | "subtract" on any select action; Select All / Deselect / Invert -> select all | none | invert
 - Select > Modify (Expand, Contract, Border) -> select {action: "expand", amount: 2}
 - Move (move the selected pixels) -> select {action: "move_pixels", dx: 3, dy: 0}; move a floating paste -> clipboard {action: "move", dx, dy}
@@ -242,22 +279,31 @@ Each line: what the app calls it -> the MCP call (example). Coordinates are canv
 - Layers / groups / blend modes -> layer {action: "add" | "set" | "merge_down" | ...}; Frames -> frame; Cels and links -> cel (copy / paste / move report the block as {copied|pasted|moved: {layers: [a, b], frames: [a, b], cels: n}}); Tags -> tag
 - Sprite sheet PNG into consecutive frames of a layer -> layer {action: "import_sheet", path, cell_width: 32, cell_height: 32, layer, frame: 0, new_layer?}
 - Palette, color mode, Snap Pixels to Palette -> palette, color_mode; Sprite > Canvas Size -> sprite_size; FX menu -> filter
-- Tween -> tween; User Data -> user_data
+- Tween -> tween; Tween panel Parent (rig) -> tween {action: "set_parent", layer, parent} (also get_parent, children, composed_transform); User Data -> user_data
 - Onion Skin -> render {onion_skin: {before: 1, after: 1}} (a view only: it never changes the document)
+- View > Frame Difference -> render {diff_prev: true, diff_opacity: 0.65} (tints the pixels changed from the previous frame: magenta changed, green appeared, red disappeared) and frame_diff {frame, layer?, wrap?} for the counts and bounds
 - History panel -> history, history_goto, undo, redo; File > Scripts -> run_lua (help topic lua_api)
+
+## Cleanup and warp
+- FX > Clean Edges… -> filter {kind: "clean_edges", halo?, despeckle?, holes?, light_specks?, thin_outline?}
+- FX > Lint Sprite… -> lint {target?, speck?, list?, palette?} (read-only)
+- FX > Remove Background… -> filter {kind: "remove_background", tolerance?, shadow?, global?, color?}
+- File > Import > Trace Pixel Art… -> doc_open {path, format: "trace_grid", pitch?, colors?, remove_background?, shadow?, close_outline?, crop?}; on an open document -> trace {…}
+- Edit > Warp… -> warp {grid: [3, 3], offsets: [[dx, dy], ...], pins?, smooth?, samples?}
 
 ## Tilemaps
 - Tilemap layers and Tile Stamp mode -> tilemap {action: "add_layer" | "stamp" | ...}, tileset
-- Terrain brush -> terrain (setup), terrain_paint {action: "paint", points}
+- Tilemap iso (isometric layers) -> tilemap {action: "add_layer", cell_w: 96, cell_h: 48, offset: [592, 360]}, tilemap {action: "stamp", i, j, tile}, tilemap {action: "offset", offset: [x, y]}, tileset {action: "set_pivot", tile, pivot: [x, y]} (also set_iso, get_pivot, clear_pivot, pivots, texture_origin)
+- Terrain brush -> terrain (setup), terrain_paint {action: "paint", points} (also on isometric layers)
 
 ## Files, Godot and Live Link
 - File > Open / New / Save / Import -> doc_open (.pxmt, .aseprite, PNG, GIF, sheets), doc_new, doc_save (an imported, never saved document is saved next to the imported file as .pxmt; replace: true first closes another clean tab that has the target file open)
 - Export PNG / GIF / APNG / PNG sequence / Sprite Sheet -> export {format}
-- Export to Godot / Export Tileset to Godot -> export_godot, export_godot_tileset (preview: true to dry-run)
+- Export to Godot / Export Tileset to Godot -> export_godot, export_godot_tileset (preview: true to dry-run; isometric tilesets export as ISOMETRIC / DIAMOND_DOWN)
 - Live Link (running Godot game) -> export_godot {save_settings: true} once, then game_screenshot; the Pixmith app itself -> app_status, app_connect
 
 ## View-only in the app (no effect on the document, nothing to call)
-- Grid, Isometric Grid display, Tiled Mode, Preview, zoom, View Options, Preferences. render shows only onion_skin of these. For the isometric grid, select iso_tile gives the cells' pixel masks.
+- Grid, Isometric Grid display, Tiled Mode, Preview, zoom, View Options, Preferences. render shows only onion_skin and frame difference (diff_prev) of these. For the isometric grid, select iso_tile gives the cells' pixel masks and tilemap grid / get_tile the cells' tiles.
 
 ## Not available through this server
 - Reference layers (New Reference Layer, Show Reference Image), Assign sRGB / Remove Profile, export or import of WebP, JPEG, BMP, TGA, ICO, PCX and FLC (PNG, GIF, APNG and .aseprite only), plugin commands and keyboard shortcut editing.
@@ -271,7 +317,7 @@ pub fn tools() -> Vec<ToolDef> {
         READ,
         HelpArgs,
         help,
-        "Documentation for using this server: guide (conventions and workflows — read this first), lua_api (the full Lua scripting reference for run_lua), lua_examples (example scripts shipped with Pixmith), palettes (palette and color mode tools, built-in preset names), tools (one line per tool), app_tools (every tool of the Pixmith app - Pencil, Eraser, Paint Bucket, Blur, Marquee, Isometric Tile, ink modes, ... - mapped to its MCP call), and short how-tos per tool group: documents, layers, drawing, selection, transform, filters, tilemaps, slices, tween, export, history, live."
+        "Documentation for using this server: guide (conventions and workflows — read this first), lua_api (the full Lua scripting reference for run_lua), lua_examples (example scripts shipped with Pixmith), palettes (palette and color mode tools, built-in preset names), tools (one line per tool), app_tools (every tool of the Pixmith app - Pencil, Eraser, Paint Bucket, Blur, Marquee, Isometric Tile, ink modes, ... - mapped to its MCP call), and short how-tos per tool group: documents, layers, drawing, selection, transform, filters, cleanup (trace, lint, clean edges, remove background, frame difference, warp), tilemaps (incl. isometric), slices, tween (incl. the parent rig), export, history, live."
     )]
 }
 
@@ -290,6 +336,7 @@ pub enum Topic {
     Selection,
     Transform,
     Filters,
+    Cleanup,
     Tilemaps,
     Slices,
     Tween,
@@ -301,7 +348,7 @@ pub enum Topic {
 #[derive(Deserialize, JsonSchema)]
 pub struct HelpArgs {
     /// guide (default), lua_api, lua_examples, palettes, tools, app_tools (the Pixmith app's tools/menu items mapped to MCP calls), or a tool group: documents, layers, drawing, selection,
-    /// transform, filters, tilemaps, slices, tween, export, history, live.
+    /// transform, filters, cleanup, tilemaps, slices, tween, export, history, live.
     pub topic: Option<Topic>,
 }
 
@@ -346,6 +393,7 @@ fn topic_text(t: Topic) -> String {
         Topic::Selection => SELECTION.to_string(),
         Topic::Transform => TRANSFORM.to_string(),
         Topic::Filters => FILTERS.to_string(),
+        Topic::Cleanup => CLEANUP.to_string(),
         Topic::Tilemaps => TILEMAPS.to_string(),
         Topic::Slices => SLICES.to_string(),
         Topic::Tween => TWEEN.to_string(),
@@ -363,7 +411,7 @@ fn help(_: &mut Engine, a: HelpArgs) -> R<Out> {
 mod tests {
     use super::*;
 
-    const ALL: [Topic; 18] = [
+    const ALL: [Topic; 19] = [
         Topic::Guide,
         Topic::LuaApi,
         Topic::LuaExamples,
@@ -376,6 +424,7 @@ mod tests {
         Topic::Selection,
         Topic::Transform,
         Topic::Filters,
+        Topic::Cleanup,
         Topic::Tilemaps,
         Topic::Slices,
         Topic::Tween,

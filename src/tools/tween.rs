@@ -3,6 +3,7 @@
 use super::{CHANGE, Out, ToolDef, need, tool};
 use crate::doc::{fail, take_string};
 use crate::engine::{DocEntry, Engine, R, Ref, Undo};
+use pixmith_core::gamedev::rig;
 use pixmith_core::gamedev::tween as tw;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -16,7 +17,7 @@ pub fn tools() -> Vec<ToolDef> {
         CHANGE,
         TweenArgs,
         tween,
-        "Animate a layer (or group) by keyframes instead of redrawing it: properties x, y (offset in pixels), rotation (degrees, clockwise), scale_x, scale_y (1 = 100%), opacity (0-1). Between keys the value follows the key's ease: linear, hold, in_quad, out_quad, in_out_quad, in_out_cubic, out_back, out_bounce, or bezier with control points [x1, y1, x2, y2]. Actions: info (keys, pivot, options, the transform at `frame`), set_key, set_keys (several properties at one frame), remove_key (alias: delete_key), move_key, set_ease, set_pivot / reset_pivot (rotation/scale center), set_options (rotsprite, snap_scale, ignore_opacity), copy_keys / paste_keys, bake (render the tween into real cels: mode all / range / frame; new_layer puts them on a new layer; keep_source keeps the keys), bake_all. Tweened layers already render and export animated; bake when you need real per-frame pixels to edit."
+        "Animate a layer (or group) by keyframes instead of redrawing it: properties x, y (offset in pixels), rotation (degrees, clockwise), scale_x, scale_y (1 = 100%), opacity (0-1). Between keys the value follows the key's ease: linear, hold, in_quad, out_quad, in_out_quad, in_out_cubic, out_back, out_bounce, or bezier with control points [x1, y1, x2, y2]. Actions: info (keys, pivot, options, the transform at `frame`), set_key, set_keys (several properties at one frame), remove_key (alias: delete_key), move_key, set_ease, set_pivot / reset_pivot (rotation/scale center), set_options (rotsprite, snap_scale, ignore_opacity), copy_keys / paste_keys, bake (render the tween into real cels: mode all / range / frame; new_layer puts them on a new layer; keep_source keeps the keys), bake_all. Tween rig (the app's Tween panel Parent picker): a layer can have a tween parent, so its transform is the parent's composed with its own about its own pivot: rotate a thigh and the shin, whose pivot is the knee, follows (thigh -> shin -> boot, body -> arm). Actions set_parent (parent = a layer; fails for a cycle, a group or a tilemap), clear_parent, get_parent, children (direct children of `layer`), composed_transform (at `frame`: matrix [a, b, c, d, e, f] with x' = a*x + c*y + e, y' = b*x + d*y + f including all ancestors, rotation in degrees, scale_x, scale_y and where the layer's pivot is on the canvas; a child without keys of its own just follows its parent). Opacity is not inherited. info shows parent, children and the effective frame range. bake and bake_all are rig-aware (a child bakes with its composed transform; baking a child alone detaches it; a layer that still has children needs keep_source or bake_all). The parent link is saved with the document. Tweened layers already render and export animated; bake when you need real per-frame pixels to edit."
     )]
 }
 
@@ -66,6 +67,12 @@ pub enum TweenAction {
     PasteKeys,
     Bake,
     BakeAll,
+    /// Tween rig: give the layer a parent.
+    SetParent,
+    ClearParent,
+    GetParent,
+    Children,
+    ComposedTransform,
 }
 
 #[derive(Deserialize, JsonSchema, Clone, Copy, PartialEq, Eq, Debug)]
@@ -119,12 +126,44 @@ pub struct TweenArgs {
     pub snap_scale: Option<bool>,
     /// set_options: ignore the opacity track.
     pub ignore_opacity: Option<bool>,
+    /// set_parent: the parent layer (index or name).
+    pub parent: Option<Ref>,
     /// bake: all (default), range (from..to) or frame.
     pub mode: Option<BakeMode>,
     /// bake: put the baked cels on a new layer (groups always do).
     pub new_layer: Option<bool>,
     /// bake: keep the keys and the source cel.
     pub keep_source: Option<bool>,
+}
+
+/// The parent, children and effective range of a layer in the tween rig, and its composed transform at `frame`.
+fn rig_json(d: &DocEntry, l: u32, frame: u32) -> Value {
+    let raw = d.doc.raw();
+    let p = unsafe { rig::pixmith_tween_get_parent(raw, l) };
+    let n = unsafe { rig::pixmith_tween_children(raw, l, std::ptr::null_mut(), 0) };
+    let mut kids = vec![0u32; n as usize];
+    unsafe { rig::pixmith_tween_children(raw, l, kids.as_mut_ptr(), n) };
+    let mut range = [0u32; 2];
+    let has_range = unsafe { rig::pixmith_tween_effective_range(raw, l, range.as_mut_ptr()) };
+    json!({
+        "parent": (p >= 0).then_some(p),
+        "parent_name": (p >= 0).then(|| d.layer_name(p as u32)),
+        "children": kids,
+        "effective_range": has_range.then_some(range),
+        "composed": composed(raw, l, frame),
+    })
+}
+
+/// The composed transform of a layer at a frame (a parent's included), or null when nothing tweens it.
+fn composed(raw: *mut pixmith_core::Editor, l: u32, frame: u32) -> Value {
+    let mut m = [0f32; 11];
+    if !unsafe { rig::pixmith_tween_composed_at(raw, l, frame, m.as_mut_ptr()) } {
+        return Value::Null;
+    }
+    json!({
+        "frame": frame, "matrix": [m[0], m[1], m[2], m[3], m[4], m[5]], "rotation": m[6],
+        "scale_x": m[7], "scale_y": m[8], "pivot": [m[9], m[10]],
+    })
 }
 
 fn info(d: &DocEntry, l: u32, frame: u32) -> Value {
@@ -156,7 +195,9 @@ fn info(d: &DocEntry, l: u32, frame: u32) -> Value {
     let mut range = [0u32; 2];
     let has_range = unsafe { tw::pixmith_tween_range(raw, l, range.as_mut_ptr()) };
     let warning = unsafe { take_string(tw::pixmith_tween_warning_text(raw, l)) };
+    let rig = rig_json(d, l, frame);
     json!({
+        "rig": rig,
         "layer": l,
         "tracks": tracks,
         "key_range": has_range.then_some(range),
@@ -282,6 +323,32 @@ fn tween(e: &mut Engine, a: TweenArgs) -> R<Out> {
                 if n == 0 { Err("nothing to paste; copy_keys first".to_string()) } else { Ok(n) }
             })?;
             extra = json!({ "pasted_keys": n });
+        }
+        TweenAction::SetParent => {
+            let p = d.layer(&Some(need(a.parent.clone(), "parent", &act)?))?;
+            d.edit("Set Tween Parent", Undo::Step, |_| {
+                let r = unsafe { rig::pixmith_tween_set_parent(raw, l, p as i32) };
+                if r {
+                    Ok(())
+                } else {
+                    Err(fail(format!(
+                        "layer {l} cannot have layer {p} as its tween parent (a layer cannot be its own ancestor, and groups and tilemap layers cannot take part)"
+                    )))
+                }
+            })?;
+        }
+        TweenAction::ClearParent => {
+            d.edit("Clear Tween Parent", Undo::Step, |_| {
+                ok(unsafe { rig::pixmith_tween_set_parent(raw, l, -1) }, "could not unlink the layer")
+            })?;
+        }
+        TweenAction::GetParent | TweenAction::Children => {}
+        TweenAction::ComposedTransform => {
+            let c = composed(raw, l, f);
+            if c.is_null() {
+                return Err(format!("layer {l} and its ancestors have no tween keys, so there is no transform"));
+            }
+            extra = c;
         }
         TweenAction::Bake => {
             let mode = a.mode.unwrap_or(BakeMode::All);

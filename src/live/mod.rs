@@ -731,8 +731,8 @@ fn open_in_app(e: &mut Engine, call: &Call, args: Value) -> R<Out> {
         let v = e.live.rpc_busy("documents.open", json!({ "path": show(&path) })).map_err(|x| explain(&x, &a.path))?;
         return Out::json(app_summary(e, &created_doc(&v)?)?);
     }
-    // PNG, GIF and sheet imports are built here and handed to a new tab.
-    (call.def.run)(e, args)?;
+    // PNG, GIF, sheet and trace imports are built here and handed to a new tab.
+    let built = (call.def.run)(e, args)?;
     let temp = e.take_last().ok_or("internal error: no document was created")?;
     let doc = new_tab(e, Some(&temp.name), temp.doc.sprite(), "doc_open", true, &a.path)?;
     let mut s = match app_summary(e, &doc) {
@@ -740,6 +740,9 @@ fn open_in_app(e: &mut Engine, call: &Call, args: Value) -> R<Out> {
         Err(m) => return Err(abandon(e, &doc, m)),
     };
     s["imported_from"] = json!(show(&path));
+    if let Some(t) = built.value.get("trace") {
+        s["trace"] = t.clone();
+    }
     e.live.sources.insert(doc.id.clone(), path);
     Out::json(s)
 }
