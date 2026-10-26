@@ -35,8 +35,9 @@ pub fn app_data_dir(os: Os, env: &dyn Fn(&str) -> Option<String>) -> Option<Path
     match os {
         Os::Mac => Some(home()?.join("Library").join("Application Support").join(name)),
         Os::Windows => Some(PathBuf::from(get("APPDATA")?).join(name)),
-        Os::Linux => match get("XDG_DATA_HOME").map(PathBuf::from).filter(|p| p.is_absolute()) {
-            Some(x) => Some(x.join(name)),
+        // Absolute by the Linux rule (a leading `/`), so the result does not depend on the OS running the check.
+        Os::Linux => match get("XDG_DATA_HOME").filter(|p| p.starts_with('/')) {
+            Some(x) => Some(PathBuf::from(x).join(name)),
             None => Some(home()?.join(".local").join("share").join(name)),
         },
     }
