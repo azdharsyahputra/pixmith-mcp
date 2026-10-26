@@ -11,6 +11,7 @@ use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::Deserialize;
 use std::borrow::Cow;
 use std::cell::Cell;
+use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 use std::sync::mpsc;
@@ -269,13 +270,25 @@ pub struct Engine {
     next_id: u32,
     pub sandbox: Sandbox,
     pub clip: Option<Clip>,
+    /// Size of the block in the cel clipboard (`cel copy`): layers, frames and how many of its cels hold an image.
+    pub cel_clip: Option<(u32, u32, u32)>,
+    /// Isometric grid settings per document id (`iso_grid` tool), the default of `select` action `iso_tile`.
+    pub iso_grids: HashMap<String, crate::iso::Iso>,
     /// The connection to a running Pixmith app (live mode).
     pub live: Live,
 }
 
 impl Engine {
     pub fn new(sandbox: Sandbox, live: Mode) -> Engine {
-        Engine { docs: Vec::new(), next_id: 1, sandbox, clip: None, live: Live::new(live) }
+        Engine {
+            docs: Vec::new(),
+            next_id: 1,
+            sandbox,
+            clip: None,
+            cel_clip: None,
+            iso_grids: HashMap::new(),
+            live: Live::new(live),
+        }
     }
 
     /// Removes and returns the newest document, giving its id back for the next one. Live mode builds some

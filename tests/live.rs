@@ -677,6 +677,7 @@ fn a_lost_connection_is_an_error_not_a_silent_headless_document() {
     // Creating and editing must not quietly go headless.
     let e = c.err("doc_new", json!({ "width": 4, "height": 4 }));
     assert!(e.contains(PROBLEM) && e.contains("target: \"headless\"") && e.contains("app_disconnect"), "{e}");
+    assert!(e.contains("lost connection to the Pixmith app") && e.contains("app_connect"), "{e}");
     let e = c.err("draw_pixels", json!({ "points": [[1, 1]], "color": "#00ff00" }));
     assert!(e.contains(PROBLEM), "{e}");
     let e = c.err("doc_info", json!({}));
@@ -850,4 +851,62 @@ fn the_headless_limit_applies_next_to_the_app_and_ignores_app_documents() {
     let r = c.ok("doc_new", json!({ "width": 2, "height": 2 }));
     assert_eq!(r["doc"], "app:doc-2");
     assert!(r.get("note").is_none(), "{r}");
+}
+
+fn tiny_png(c: &Client, name: &str) -> std::path::PathBuf {
+    let p = c.path(name);
+    common::write_png(&p, 2, 2, &[255, 0, 0, 255].repeat(4));
+    p
+}
+
+#[test]
+fn doc_save_replace_closes_a_clean_tab_that_holds_the_file() {
+    let (mut c, mock) = start();
+    let file = c.path("hero.pxmt");
+    std::fs::write(&file, b"x").unwrap();
+    let canon = std::fs::canonicalize(&file).unwrap().to_string_lossy().into_owned();
+    // doc-2 holds the file; doc-1 wants to save there.
+    let two = mock.with(|s| s.add(pixmith_core::Sprite::new(8, 8), "old.pxmt", Some(canon.clone())));
+    assert_eq!(two, "doc-2");
+    let e = c.err("doc_save", json!({ "doc": "app:doc-1", "path": file.to_string_lossy() }));
+    assert!(e.contains("replace: true") && e.contains("app:doc-2"), "{e}");
+    assert_eq!(mock.doc_count(), 2);
+    // A tab with unsaved changes is never closed.
+    mock.user_fill("doc-2", 0xff0000ff);
+    let e = c.err("doc_save", json!({ "doc": "app:doc-1", "path": file.to_string_lossy(), "replace": true }));
+    assert!(e.contains("unsaved changes") && e.contains("nothing was saved"), "{e}");
+    assert_eq!(mock.doc_count(), 2);
+    // Clean again: replace closes it and saves.
+    mock.with(|s| s.docs.iter_mut().find(|d| d.id == "doc-2").unwrap().dirty = false);
+    let r = c.ok("doc_save", json!({ "doc": "app:doc-1", "path": file.to_string_lossy(), "replace": true }));
+    assert_eq!(r["closed_tabs"], json!(["app:doc-2"]), "{r}");
+    assert_eq!(mock.doc_count(), 1);
+}
+
+#[test]
+fn a_failed_import_does_not_leave_a_half_built_tab() {
+    let (mut c, mock) = start();
+    let png = tiny_png(&c, "sheet.png");
+    mock.with(|s| s.apply_fail_next = 1);
+    let e = c.err("doc_open", json!({ "path": png.to_string_lossy(), "target": "app" }));
+    assert!(e.contains("could not apply") && e.contains("was closed again"), "{e}");
+    assert_eq!(mock.doc_count(), 1, "the tab made for the import is gone");
+    // The next open works.
+    let r = c.ok("doc_open", json!({ "path": png.to_string_lossy(), "target": "app" }));
+    assert_eq!(r["target"], "app", "{r}");
+    assert_eq!(mock.doc_count(), 2);
+}
+
+#[test]
+fn an_imported_app_document_is_saved_next_to_its_source() {
+    let (mut c, mock) = start();
+    let png = tiny_png(&c, "walk.png");
+    let r = c.ok("doc_open", json!({ "path": png.to_string_lossy(), "target": "app" }));
+    let id = r["doc"].as_str().unwrap().to_string();
+    let s = c.ok("doc_save", json!({ "doc": id }));
+    let saved = s["saved"].as_str().unwrap();
+    assert!(saved.ends_with("walk.pxmt"), "{s}");
+    assert_eq!(std::path::Path::new(saved).parent().unwrap(), std::fs::canonicalize(c.path("")).unwrap(), "{s}");
+    assert!(s["note"].as_str().unwrap().contains("next to the imported file"), "{s}");
+    assert_eq!(mock.doc_count(), 2);
 }

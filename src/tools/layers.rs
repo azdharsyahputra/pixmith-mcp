@@ -25,7 +25,7 @@ pub fn tools() -> Vec<ToolDef> {
             CHANGE,
             LayerArgs,
             layer,
-            "Edit the layer stack (index 0 = bottom; a group comes right below its children in the list). Actions: add (new image layer above `layer`, default above the active one), add_group, duplicate, remove (alias: delete; a group with its children), move_up / move_down (one step), move_to (to stack position `to`), into_group (move into `group`), out_of_group, wrap_in_group (put the layer in a new group), merge_down, set (any of name, visible, opacity 0-255, blend_mode), import_png (PNG file as a new layer; with replace=true it instead puts the PNG into the existing `layer` at `frame` in one undo step, keeping the layer's name, order, opacity and blend mode, optionally shifted by x / y). New layers become the active layer. Returns the updated layer list."
+            "Layer menu and panel: edit the layer stack (index 0 = bottom; a group comes right below its children in the list). Actions: add (new image layer above `layer`, default above the active one), add_group, duplicate, remove (alias: delete; a group with its children), move_up / move_down (one step), move_to (to stack position `to`), into_group (move into `group`), out_of_group, wrap_in_group (put the layer in a new group), merge_down, set (any of name, visible, opacity 0-255, blend_mode), import_sheet (slice a sprite-sheet PNG `path` into cells of cell_width x cell_height (cell_height defaults to cell_width), read row by row, onto consecutive frames of the existing image `layer` (or a new one with new_layer=true and `name`) starting at `frame` (default 0); frames are created after the last one as needed; optional cols / rows / frames limit the cells; one undo step), import_png (PNG file as a new layer; with replace=true it instead puts the PNG into the existing `layer` at `frame` in one undo step, keeping the layer's name, order, opacity and blend mode, optionally shifted by x / y). New layers become the active layer. Returns the updated layer list."
         ),
         tool!(
             "Layers & frames",
@@ -34,7 +34,7 @@ pub fn tools() -> Vec<ToolDef> {
             CHANGE,
             FrameArgs,
             frame,
-            "Edit animation frames (0-based). Actions: add (`count` empty frames after `frame`, default after the active one), duplicate (copy `frame` right after itself, `count` times), remove (alias: delete), move (frame `frame` to position `to`), set_duration (milliseconds for `frame`, `frames` list, or every frame with all=true). Tags are adjusted automatically."
+            "Frame menu and timeline: edit animation frames (0-based). Actions: add (`count` empty frames after `frame`, default after the active one), duplicate (copy `frame` right after itself, `count` times), remove (alias: delete), move (frame `frame` to position `to`), set_duration (milliseconds for `frame`, `frames` list, or every frame with all=true). Tags are adjusted automatically."
         ),
         tool!(
             "Layers & frames",
@@ -52,7 +52,7 @@ pub fn tools() -> Vec<ToolDef> {
             CHANGE,
             TagArgs,
             tag,
-            "Animation tags (named frame ranges used for playback and exports). Actions: add (name, from, to), update (any of name, from, to, direction, repeat, color), remove (alias: delete). direction: forward, reverse, ping_pong, ping_pong_reverse; repeat 0 = forever."
+            "New Tag / animation tags (named frame ranges used for playback and exports). Actions: add (name, from, to), update (any of name, from, to, direction, repeat, color), remove (alias: delete). direction: forward, reverse, ping_pong, ping_pong_reverse; repeat 0 = forever."
         ),
     ]
 }
@@ -74,6 +74,7 @@ pub enum LayerAction {
     MergeDown,
     Set,
     ImportPng,
+    ImportSheet,
 }
 
 #[derive(Deserialize, JsonSchema, Clone, Copy, PartialEq, Eq, Debug)]
@@ -133,6 +134,18 @@ pub struct LayerArgs {
     pub x: Option<i32>,
     /// import_png with replace: canvas y where the PNG's top edge goes (default 0).
     pub y: Option<i32>,
+    /// import_sheet: width of one cell in pixels.
+    pub cell_width: Option<u32>,
+    /// import_sheet: height of one cell (default = cell_width).
+    pub cell_height: Option<u32>,
+    /// import_sheet: use only this many columns of the sheet (default: all that fit).
+    pub cols: Option<u32>,
+    /// import_sheet: use only this many rows (default: all that fit).
+    pub rows: Option<u32>,
+    /// import_sheet: import at most this many cells, row by row from the top-left (default: all).
+    pub frames: Option<u32>,
+    /// import_sheet: put the cells on a NEW layer (named `name`, above `layer`) instead of the existing `layer`.
+    pub new_layer: Option<bool>,
 }
 
 /// Puts `rgba` (`w` x `h`) at (`ox`, `oy`) on a transparent canvas-sized cel and makes it the cel of `layer` at
@@ -182,13 +195,29 @@ pub fn layer_list(d: &DocEntry) -> Vec<Value> {
 
 fn layer(e: &mut Engine, a: LayerArgs) -> R<Out> {
     let src = match (a.action, &a.path) {
-        (LayerAction::ImportPng, Some(p)) => Some(e.sandbox.read(p)?),
-        (LayerAction::ImportPng, None) => return Err("import_png needs `path`".into()),
+        (LayerAction::ImportPng | LayerAction::ImportSheet, Some(p)) => Some(e.sandbox.read(p)?),
+        (LayerAction::ImportPng | LayerAction::ImportSheet, None) => {
+            return Err(format!("{} needs `path`", super::act(&a.action)));
+        }
         _ => None,
     };
     let replace = a.replace.unwrap_or(false);
+    let sheet = a.action == LayerAction::ImportSheet;
     if a.action != LayerAction::ImportPng && (replace || a.x.is_some() || a.y.is_some()) {
         return Err("`replace`, `x` and `y` belong to action import_png".into());
+    }
+    if !sheet
+        && (a.cell_width.is_some()
+            || a.cell_height.is_some()
+            || a.cols.is_some()
+            || a.rows.is_some()
+            || a.frames.is_some()
+            || a.new_layer.is_some())
+    {
+        return Err(
+            "`cell_width`, `cell_height`, `cols`, `rows`, `frames` and `new_layer` belong to action import_sheet"
+                .into(),
+        );
     }
     if !replace && (a.x.is_some() || a.y.is_some()) {
         return Err("`x` and `y` need replace=true (a new layer from a PNG always starts at the top-left)".into());
@@ -206,6 +235,7 @@ fn layer(e: &mut Engine, a: LayerArgs) -> R<Out> {
             unsafe { core::pixmith_rename_layer(raw, i, c.as_ptr()) };
         }
     };
+    let mut sheet_info = None;
     let new_index: Option<u32> = match a.action {
         LayerAction::Add => Some(d.edit("New Layer", Undo::Step, |_| {
             let i = unsafe { core::pixmith_add_layer(raw, l) };
@@ -288,6 +318,80 @@ fn layer(e: &mut Engine, a: LayerArgs) -> R<Out> {
             })?;
             None
         }
+        LayerAction::ImportSheet => {
+            let new_layer = a.new_layer.unwrap_or(false);
+            let mut l = if new_layer { d.layer(&a.layer)? } else { d.image_layer(&a.layer)? };
+            if !new_layer && d.is_tilemap(l) {
+                return Err(format!(
+                    "layer {l} ({:?}) is a tilemap layer; import_sheet works on image layers",
+                    d.layer_name(l)
+                ));
+            }
+            let cw = need(a.cell_width, "cell_width", &act)?;
+            let ch = a.cell_height.unwrap_or(cw);
+            if cw == 0 || ch == 0 {
+                return Err("cell_width and cell_height must be at least 1".into());
+            }
+            let path = src.expect("checked");
+            let bytes = std::fs::read(&path).map_err(|err| format!("{}: {err}", path.display()))?;
+            let (w, h, rgba) = import::decode_png(&bytes).map_err(|err| format!("{}: {err}", path.display()))?;
+            let cols = (w as u32 / cw).min(a.cols.unwrap_or(u32::MAX));
+            let rows = (h as u32 / ch).min(a.rows.unwrap_or(u32::MAX));
+            if cols == 0 || rows == 0 {
+                return Err(format!("the sheet is {w}x{h}, smaller than one {cw}x{ch} cell"));
+            }
+            let count = (cols * rows).min(a.frames.unwrap_or(u32::MAX));
+            if count == 0 {
+                return Err("`frames` must be at least 1".into());
+            }
+            let start = a.frame.unwrap_or(0);
+            if start > d.doc.frame_count() {
+                return Err(format!(
+                    "frame {start} is beyond the last frame ({} frames); frames are appended only in order",
+                    d.doc.frame_count()
+                ));
+            }
+            if start as u64 + count as u64 > 4096 {
+                return Err("a document holds at most 4096 frames".into());
+            }
+            let (ox, oy) = (0, 0);
+            let before = d.doc.frame_count();
+            d.edit("Import Sheet as Frames", Undo::Step, |d| {
+                if new_layer {
+                    l = unsafe { core::pixmith_add_layer(raw, l) };
+                    rename(l, &a.name);
+                }
+                for i in 0..count {
+                    let f = start + i;
+                    if f >= d.doc.frame_count() {
+                        let last = d.doc.frame_count() - 1;
+                        unsafe { core::pixmith_add_frame(raw, last, false) };
+                    }
+                    let (cx, cy) = ((i % cols * cw) as usize, (i / cols * ch) as usize);
+                    let mut cell = Vec::with_capacity((cw * ch * 4) as usize);
+                    for row in 0..ch as usize {
+                        let s = ((cy + row) * w + cx) * 4;
+                        cell.extend_from_slice(&rgba[s..s + cw as usize * 4]);
+                    }
+                    // SAFETY: `raw` is the live editor of `d`, used only on this thread.
+                    replace_cel(
+                        unsafe { &mut *raw },
+                        (l as usize, f as usize),
+                        &cell,
+                        (cw as usize, ch as usize),
+                        (ox, oy),
+                    );
+                }
+                Ok(())
+            })?;
+            d.layer = l;
+            sheet_info = Some(json!({
+                "layer": l, "cell": [cw, ch], "cols": cols, "rows": rows, "cells_imported": count,
+                "first_frame": start, "last_frame": start + count - 1,
+                "frames_created": d.doc.frame_count().saturating_sub(before), "frame_count": d.doc.frame_count(),
+            }));
+            None
+        }
         LayerAction::ImportPng if replace => {
             let l = d.image_layer(&a.layer)?;
             if d.is_tilemap(l) {
@@ -334,6 +438,10 @@ fn layer(e: &mut Engine, a: LayerArgs) -> R<Out> {
     if a.action == LayerAction::ImportPng && replace {
         v["layer"] = json!(d.layer);
         v["replaced"] = json!({ "layer": d.layer, "frame": a.frame.unwrap_or(d.frame) });
+    }
+    if let Some(s) = sheet_info {
+        v["layer"] = json!(d.layer);
+        v["sheet"] = s;
     }
     if a.action == LayerAction::Set {
         v["layer"] = json!(l);
@@ -473,7 +581,31 @@ pub struct CelArgs {
     pub copy: Option<bool>,
 }
 
+/// `(layers, frames, cels holding an image)` of a block of cels.
+/// What a cel block call reports: the result key, the top-left `(layer, frame)` and `(layers, frames, with image)`.
+type Block = (&'static str, (u32, u32), (u32, u32, u32));
+
+fn block_count(raw: *mut Editor, (l0, l1): (u32, u32), (f0, f1): (u32, u32)) -> (u32, u32, u32) {
+    let mut with_image = 0;
+    for l in l0..=l1 {
+        for f in f0..=f1 {
+            if unsafe { lf::pixmith_cel_opacity(raw, l, f) } >= 0 {
+                with_image += 1;
+            }
+        }
+    }
+    (l1 - l0 + 1, f1 - f0 + 1, with_image)
+}
+
+fn block_summary(verb: &str, (layers, frames, with_image): (u32, u32, u32)) -> String {
+    format!("{verb} {layers} layer(s) x {frames} frame(s) = {} cel(s), {with_image} with an image", layers * frames)
+}
+
 fn cel(e: &mut Engine, a: CelArgs) -> R<Out> {
+    let e_clip = e.cel_clip;
+    let mut summary: Option<String> = None;
+    let mut blk: Option<Block> = None;
+    let mut new_clip: Option<Option<(u32, u32, u32)>> = None;
     let d = e.doc(&a.doc)?;
     let raw = d.doc.raw();
     let act = super::act(&a.action);
@@ -514,7 +646,13 @@ fn cel(e: &mut Engine, a: CelArgs) -> R<Out> {
         CelAction::Clear => d.edit("Clear Cels", Undo::Step, |_| {
             ok(unsafe { lf::pixmith_cels_clear(raw, l0, l1, f0, f1b) }, "nothing to clear")
         })?,
-        CelAction::Copy => ok(unsafe { lf::pixmith_cels_copy(raw, l0, l1, f0, f1b) }, "nothing to copy")?,
+        CelAction::Copy => {
+            let block = block_count(raw, (l0, l1), (f0, f1b));
+            ok(unsafe { lf::pixmith_cels_copy(raw, l0, l1, f0, f1b) }, "nothing to copy")?;
+            summary = Some(block_summary("copied", block));
+            blk = Some(("copied", (l0, f0), block));
+            new_clip = Some(Some(block));
+        }
         CelAction::Paste => {
             if !unsafe { lf::pixmith_cels_has_clip() } {
                 return Err("the cel clipboard is empty; copy first".into());
@@ -522,23 +660,55 @@ fn cel(e: &mut Engine, a: CelArgs) -> R<Out> {
             d.edit("Paste Cels", Undo::Step, |_| {
                 ok(unsafe { lf::pixmith_cels_paste(raw, l, f) }, "could not paste the cels")
             })?;
+            // The clipboard keeps the size of the block that was copied.
+            let block = e_clip.unwrap_or((1, 1, 0));
+            summary = Some(format!("{} at layer {l}, frame {f}", block_summary("pasted", block)));
+            blk = Some(("pasted", (l, f), block));
         }
         CelAction::Move => {
             let (dl, df) = (a.dl.unwrap_or(0), a.df.unwrap_or(0));
             let copy = a.copy.unwrap_or(false);
+            let block = block_count(raw, (l0, l1), (f0, f1b));
             d.edit(if copy { "Copy Cels" } else { "Move Cels" }, Undo::Step, |_| {
                 ok(unsafe { lf::pixmith_cels_move(raw, l0, l1, f0, f1b, dl, df, copy) }, "could not move the cels")
             })?;
+            summary = Some(format!(
+                "{} by {dl} layers, {df} frames",
+                block_summary(if copy { "duplicated" } else { "moved" }, block)
+            ));
+            // The cels now sit at the moved position.
+            blk = Some((
+                if copy { "duplicated" } else { "moved" },
+                ((l0 as i64 + dl as i64).max(0) as u32, (f0 as i64 + df as i64).max(0) as u32),
+                block,
+            ));
         }
         CelAction::Info => {}
     }
     let op = unsafe { lf::pixmith_cel_opacity(raw, l, f) };
-    Out::json(json!({
+    let mut v = json!({
         "doc": d.id, "layer": l, "frame": f,
         "exists": op >= 0, "opacity": (op >= 0).then_some(op),
         "linked": unsafe { lf::pixmith_cel_is_linked(raw, l, f) },
         "user_data": super::docs::user_data(d, 2, f, l),
-    }))
+    });
+    if let Some(s) = summary {
+        v["summary"] = json!(s);
+        if let Some((key, (l0, f0), (layers, frames, with_image))) = blk {
+            v[key] = json!({
+                "layers": [l0, l0 + layers - 1], "frames": [f0, f0 + frames - 1],
+                "cels": layers * frames, "with_image": with_image,
+            });
+        }
+        // The cel fields above describe the cel at layer/frame only.
+        v["note"] = json!(
+            "layer/frame/exists/opacity/linked describe the single cel at that position; `summary` covers the whole block"
+        );
+    }
+    if let Some(c) = new_clip {
+        e.cel_clip = c;
+    }
+    Out::json(v)
 }
 
 #[derive(Deserialize, JsonSchema, Clone, Copy, PartialEq, Eq, Debug)]

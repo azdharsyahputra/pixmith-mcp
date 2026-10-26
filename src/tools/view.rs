@@ -21,7 +21,7 @@ pub fn tools() -> Vec<ToolDef> {
             READ,
             RenderArgs,
             render,
-            "Render the sprite as a PNG image you can look at (MCP image content). Defaults: the active frame, all visible layers composited, scaled up so the long side is about 512 px, on a light checkerboard so transparency is visible. Options: other frames (up to 16 images at once), a single layer or group in isolation (shown even if hidden), a region, an explicit integer scale, a solid/transparent background, and onion skin (neighboring frames tinted red = before, blue = after). Never changes the document. For exact colors use get_pixels."
+            "Render the sprite as a PNG image you can look at (MCP image content). Defaults: the active frame, all visible layers composited, scaled up so the long side is about 512 px, on a light checkerboard so transparency is visible. Options: other frames (up to 16 images at once), a single layer or group in isolation (shown even if hidden), a region, an explicit integer scale, a solid/transparent background, and Onion Skin (onion_skin: neighboring frames tinted red = before, blue = after). The app's Grid, Isometric Grid, Tiled Mode and Preview are view-only and are not drawn. Never changes the document. For exact colors use get_pixels."
         ),
         tool!(
             "Viewing",
@@ -39,7 +39,7 @@ pub fn tools() -> Vec<ToolDef> {
             READ,
             PixelArgs,
             get_pixel,
-            "Read the color at one pixel: the composited color plus the value of every layer that has a non-transparent pixel there (top first), and the palette index if the color is in the palette."
+            "The Eyedropper (color picker): read the color at one pixel: the composited color plus the value of every layer that has a non-transparent pixel there (top first), and the palette index if the color is in the palette."
         ),
     ]
 }

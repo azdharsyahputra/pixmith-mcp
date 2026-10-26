@@ -95,6 +95,8 @@ pub struct Live {
     /// What broke the connection the last time it was lost (e.g. "Broken pipe").
     lost_cause: Option<String>,
     shadows: HashMap<String, Shadow>,
+    /// Files the app's imported documents (PNG, GIF, sheet) came from, by app document id.
+    sources: HashMap<String, std::path::PathBuf>,
 }
 
 impl Live {
@@ -107,6 +109,7 @@ impl Live {
             was_connected: false,
             lost_cause: None,
             shadows: HashMap::new(),
+            sources: HashMap::new(),
         }
     }
 
@@ -182,6 +185,17 @@ impl Live {
         self.shadows.clear();
     }
 
+    /// Closes a tab this server created in the app and could not finish building (best effort, reconnecting once).
+    /// Returns whether the tab is gone.
+    fn discard_tab(&mut self, id: &str) -> bool {
+        if self.conn.is_none() && !self.ensure() {
+            return false;
+        }
+        self.shadows.remove(id);
+        self.sources.remove(id);
+        self.rpc_busy("documents.close", json!({ "id": id, "discard": true })).is_ok()
+    }
+
     /// The server was connected to the app earlier in this session.
     pub fn was_connected(&self) -> bool {
         self.was_connected
@@ -201,7 +215,7 @@ impl Live {
             None => why.to_string(),
         };
         Some(format!(
-            "the Pixmith app was connected but is not reachable now ({why}); start it again, or pass target: \"headless\" (doc_new / doc_open) or a headless document id as `doc`, or call app_disconnect to work headless on purpose"
+            "lost connection to the Pixmith app: it was connected but is not reachable now ({why}); nothing was changed. Start it again and call app_connect (the next call also reconnects by itself), or pass target: \"headless\" (doc_new / doc_open) or a headless document id as `doc`, or call app_disconnect to work headless on purpose"
         ))
     }
 
@@ -296,6 +310,7 @@ impl Live {
             .map(str::to_string)
             .or_else(|| docs.iter().find(|d| d.active).map(|d| d.id.clone()));
         self.shadows.retain(|id, _| docs.iter().any(|d| d.id == *id));
+        self.sources.retain(|id, _| docs.iter().any(|d| d.id == *id));
         Ok((docs, active))
     }
 
@@ -444,7 +459,7 @@ fn explain(err: &RpcError, doc: &str) -> String {
         }
         RpcError::Rpc { code: BUSY, .. } => "the Pixmith app is busy (a dialog is open or a stroke is in progress); nothing was changed, try again in a moment".into(),
         RpcError::Rpc { message, .. } => message.clone(),
-        RpcError::Io(m) => format!("{m} (the live connection is gone; the next call reconnects if the app is still running)"),
+        RpcError::Io(m) => format!("lost connection to the Pixmith app ({m}); reconnect with app_connect once the app is running again"),
     }
 }
 
@@ -705,12 +720,15 @@ fn new_in_app(e: &mut Engine, call: &Call, args: Value) -> R<Out> {
     let v = e.live.rpc_busy("documents.new", params).map_err(|x| explain(&x, "the new document"))?;
     let mut doc = created_doc(&v)?;
     if extras {
-        doc = e
-            .live
-            .apply(&doc.id, doc.revision, temp.doc.sprite(), "doc_new", None, None)
-            .map_err(|x| explain(&x, &doc.tool_id()))?;
+        match e.live.apply(&doc.id, doc.revision, temp.doc.sprite(), "doc_new", None, None) {
+            Ok(d) => doc = d,
+            Err(x) => return Err(abandon(e, &doc, explain(&x, &doc.tool_id()))),
+        }
     }
-    Out::json(app_summary(e, &doc)?)
+    match app_summary(e, &doc) {
+        Ok(s) => Out::json(s),
+        Err(m) => Err(abandon(e, &doc, m)),
+    }
 }
 
 fn open_in_app(e: &mut Engine, call: &Call, args: Value) -> R<Out> {
@@ -732,14 +750,34 @@ fn open_in_app(e: &mut Engine, call: &Call, args: Value) -> R<Out> {
         .live
         .rpc_busy("documents.new", json!({ "width": w, "height": h, "name": temp.name }))
         .map_err(|x| explain(&x, &a.path))?;
-    let doc = created_doc(&v)?;
-    let doc = e
-        .live
-        .apply(&doc.id, doc.revision, temp.doc.sprite(), "doc_open", None, None)
-        .map_err(|x| explain(&x, &doc.tool_id()))?;
-    let mut s = app_summary(e, &doc)?;
+    let created = created_doc(&v)?;
+    let doc = match e.live.apply(&created.id, created.revision, temp.doc.sprite(), "doc_open", None, None) {
+        Ok(d) => d,
+        Err(x) => return Err(abandon(e, &created, explain(&x, &created.tool_id()))),
+    };
+    let mut s = match app_summary(e, &doc) {
+        Ok(s) => s,
+        Err(m) => return Err(abandon(e, &doc, m)),
+    };
     s["imported_from"] = json!(show(&path));
+    e.live.sources.insert(doc.id.clone(), path);
     Out::json(s)
+}
+
+/// A call that created a tab in the app failed before the document was complete: closes the half-built tab so the
+/// user is not left with an empty or one-frame sprite, and says so in the error.
+fn abandon(e: &mut Engine, doc: &AppDoc, message: String) -> String {
+    if e.live.discard_tab(&doc.id) {
+        format!(
+            "{message}. The tab {} that had been created for it was closed again; nothing was left in the app",
+            doc.tool_id()
+        )
+    } else {
+        format!(
+            "{message}. The tab {} that had been created for it could not be closed; close it by hand (doc_close with discard_changes=true, or in the app)",
+            doc.tool_id()
+        )
+    }
 }
 
 // MARK: Tools on an app document
@@ -860,7 +898,7 @@ fn run_on_shadow(e: &mut Engine, call: &Call, args: Value, mut doc: AppDoc) -> R
             }
             Err(RpcError::Io(m)) => {
                 return Err(format!(
-                    "{m}; the edit may or may not have reached the app, check with doc_info (the next call reconnects if the app is still running)"
+                    "lost connection to the Pixmith app ({m}); the edit may or may not have reached the app, check with doc_info after reconnecting with app_connect. Nothing was applied to a headless copy"
                 ));
             }
             Err(other) => return Err(explain(&other, &tool_id)),
@@ -876,15 +914,23 @@ fn save_in_app(e: &mut Engine, args: Value, doc: AppDoc) -> R<Out> {
     let tool_id = doc.tool_id();
     let path = args.get("path").and_then(Value::as_str).map(str::to_string);
     let copy = args.get("copy").and_then(Value::as_bool).unwrap_or(false);
+    let replace = args.get("replace").and_then(Value::as_bool).unwrap_or(false);
+    let mut defaulted = false;
     let target = match (&path, &doc.path) {
         (Some(p), _) => e.sandbox.write(p)?,
         (None, Some(p)) => e.sandbox.write(p)?,
-        (None, None) => {
-            return Err(format!(
-                "{tool_id} has no file yet; pass path (e.g. \"{}.pxmt\" or \"{}.aseprite\")",
-                doc.name, doc.name
-            ));
-        }
+        (None, None) => match e.live.sources.get(&doc.id) {
+            Some(src) => {
+                defaulted = true;
+                e.sandbox.write(&crate::tools::docs::default_save_path(src).to_string_lossy())?
+            }
+            None => {
+                return Err(format!(
+                    "{tool_id} has no file yet; pass path (e.g. \"{}.pxmt\" or \"{}.aseprite\")",
+                    doc.name, doc.name
+                ));
+            }
+        },
     };
     let ext = target.extension().map(|x| x.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
     if !matches!(ext.as_str(), "pxmt" | "aseprite" | "ase") {
@@ -906,13 +952,64 @@ fn save_in_app(e: &mut Engine, args: Value, doc: AppDoc) -> R<Out> {
             json!({ "doc": tool_id, "saved": show(&target), "format": ext, "bytes": size, "copy": true, "dirty": doc.dirty }),
         );
     }
-    let params = json!({ "id": doc.id, "path": show(&target) });
-    let v = e.live.rpc_busy("documents.save", params).map_err(|x| explain(&x, &tool_id))?;
+    // The app refuses to save to a file that another of its tabs has open.
+    let mut closed_other = Vec::new();
+    let (all, _) = e.live.list().map_err(|x| explain(&x, &tool_id))?;
+    for other in all.iter().filter(|o| o.id != doc.id && o.path.as_deref().is_some_and(|p| same_file(p, &target))) {
+        let who = format!("{} ({})", other.tool_id(), other.name);
+        if !replace {
+            return Err(format!(
+                "{} is already open in the app as {who}, and the app cannot save two tabs to one file. Close that tab first (doc_close), or pass replace: true to close it automatically when it has no unsaved changes",
+                show(&target)
+            ));
+        }
+        if other.dirty {
+            return Err(format!(
+                "{} is open in the app as {who} with unsaved changes, so replace did not close it and nothing was saved. Save it elsewhere (doc_save) or discard it (doc_close with discard_changes=true), then retry",
+                show(&target)
+            ));
+        }
+        match e.live.rpc_busy("documents.close", json!({ "id": other.id, "discard": false })) {
+            Ok(_) => {
+                e.live.shadows.remove(&other.id);
+                e.live.sources.remove(&other.id);
+                closed_other.push(other.tool_id());
+            }
+            Err(RpcError::Rpc { code: UNSAVED, .. }) => {
+                return Err(format!("{who} has unsaved changes, so replace did not close it and nothing was saved"));
+            }
+            Err(x) => return Err(explain(&x, &other.tool_id())),
+        }
+    }
+    let mut params = json!({ "id": doc.id, "path": show(&target) });
+    if replace {
+        // Newer apps close a clean tab holding the file themselves; older ones ignore the field.
+        params["replace_open"] = json!(true);
+    }
+    let v = e.live.rpc_busy("documents.save", params).map_err(|x| {
+        let m = explain(&x, &tool_id);
+        if m.contains("already open in another tab") {
+            format!("{m}. Pass replace: true to close that tab automatically when it has no unsaved changes")
+        } else {
+            m
+        }
+    })?;
     let saved = AppDoc::parse(v.get("document").unwrap_or(&Value::Null)).map_err(|x| explain(&x, &tool_id))?;
     let size = std::fs::metadata(&target).map(|m| m.len()).unwrap_or(0);
-    Out::json(
-        json!({ "doc": tool_id, "saved": show(&target), "format": ext, "bytes": size, "copy": false, "dirty": saved.dirty }),
-    )
+    let mut out = json!({ "doc": tool_id, "saved": show(&target), "format": ext, "bytes": size, "copy": false, "dirty": saved.dirty });
+    if defaulted {
+        out["note"] = json!(format!("no path given: saved next to the imported file as {}", show(&target)));
+    }
+    if !closed_other.is_empty() {
+        out["closed_tabs"] = json!(closed_other);
+    }
+    Out::json(out)
+}
+
+/// Whether an app document path and a target are the same file.
+fn same_file(app_path: &str, target: &std::path::Path) -> bool {
+    let a = std::path::Path::new(app_path);
+    a == target || matches!((a.canonicalize(), target.canonicalize()), (Ok(x), Ok(y)) if x == y)
 }
 
 fn close_in_app(e: &mut Engine, args: Value, doc: AppDoc) -> R<Out> {
@@ -929,6 +1026,7 @@ fn close_in_app(e: &mut Engine, args: Value, doc: AppDoc) -> R<Out> {
         Err(x) => return Err(explain(&x, &tool_id)),
     }
     e.live.shadows.remove(&doc.id);
+    e.live.sources.remove(&doc.id);
     let open = e.live.list().map(|(d, _)| d.iter().map(AppDoc::tool_id).collect::<Vec<_>>()).unwrap_or_default();
     Out::json(json!({ "closed": tool_id, "open": open }))
 }

@@ -1,9 +1,10 @@
 //! Selection and clipboard. The selection is part of the document (and of its undo history); drawing,
 //! filters, gradients and fills are clipped to it.
 
-use super::{ADD, CHANGE, Out, ToolDef, need, tool};
+use super::{ADD, CHANGE, Hints, Out, ToolDef, need, tool};
 use crate::doc::fail;
 use crate::engine::{Clip, DocEntry, Engine, R, Ref, Undo};
+use crate::iso::Iso;
 use pixmith_core::paint::selection as sel;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -18,7 +19,16 @@ pub fn tools() -> Vec<ToolDef> {
             CHANGE,
             SelectArgs,
             select,
-            "Change the selection (one undo step each): rect (x, y, w, h), polygon/lasso (points), wand (magic wand at x, y with tolerance; contiguous by default), by_color (every pixel matching the color at x, y), all, none, invert, expand/contract/border (by `amount` pixels). mode = replace (default), add or subtract combines with the existing selection. Also edits the selected pixels: delete (clear them), move_pixels (shift them by dx, dy), crop (crop the canvas to the selection bounds). Returns the selection bounds. Drawing and filters only affect selected pixels while a selection exists; select none to remove it."
+            "Change the selection (one undo step each): rect (Rectangular Marquee: x, y, w, h), lasso (Lasso: freehand outline points), polygon (Polygonal Lasso: corner points), wand (Magic Wand at x, y with tolerance; contiguous by default), by_color (Select by Color: every pixel matching the color at x, y), iso_tile (Select > Isometric Tile: the diamond cell of an isometric grid, by a pixel x, y or by col, row; the grid is the document's iso_grid settings, default 32x16 at 0, 0, or give tile_w, tile_h, offset_x, offset_y), all, none, invert, expand/contract/border (by `amount` pixels). mode = replace (default), add or subtract combines with the existing selection. Also edits the selected pixels: delete (clear them), move_pixels (the Move tool: shift the selected pixels by dx, dy), crop (crop the canvas to the selection bounds). Returns the selection bounds. Drawing and filters only affect selected pixels while a selection exists; select none to remove it."
+        ),
+        tool!(
+            "Selection",
+            "iso_grid",
+            "Isometric grid settings",
+            SETTING,
+            IsoGridArgs,
+            iso_grid,
+            "Read or set the isometric grid of a document: tile_w x tile_h (even, 4-4096; default 32 x 16) and offset_x / offset_y (where cell (0, 0)'s bounding box starts; default 0, 0). Cell (col, row) has its box at (offset_x + (col - row) * tile_w / 2, offset_y + (col + row) * tile_h / 2). `select` action iso_tile uses these as its defaults, so set the grid once. Actions: get (default), set (only the fields you give change), reset. Kept by this server for the document, not in the file or in the app (the app's Isometric Grid view settings cannot be read or written through the live protocol); it is lost when the server stops or the document is closed."
         ),
         tool!(
             "Selection",
@@ -27,7 +37,7 @@ pub fn tools() -> Vec<ToolDef> {
             ADD,
             ClipArgs,
             clipboard,
-            "Clipboard (shared by all documents): copy or cut the selected pixels of a layer (the whole canvas when nothing is selected); paste them (or a PNG file with paste_image) as a floating selection at (x, y) (default: where they were copied from); move the floating pixels by (dx, dy); commit to drop them onto the layer, or cancel to discard the paste. A floating paste is also committed by the next edit."
+            "Edit > Cut / Copy / Paste (clipboard shared by all documents): copy or cut the selected pixels of a layer (the whole canvas when nothing is selected); paste them (or a PNG file with paste_image) as a floating selection at (x, y) (default: where they were copied from); move the floating pixels by (dx, dy) like the Move tool; commit to drop them onto the layer, or cancel to discard the paste. A floating paste is also committed by the next edit."
         ),
     ]
 }
@@ -40,6 +50,7 @@ pub enum SelectAction {
     Lasso,
     Wand,
     ByColor,
+    IsoTile,
     All,
     None,
     Invert,
@@ -65,7 +76,7 @@ pub struct SelectArgs {
     pub action: SelectAction,
     /// Document id (see doc_list); optional when only one document is open.
     pub doc: Option<String>,
-    /// replace (default), add or subtract — for rect, polygon, lasso, wand, by_color.
+    /// replace (default), add or subtract — for rect, polygon, lasso, wand, by_color, iso_tile (the app's Shift = add, Alt = subtract).
     pub mode: Option<SelMode>,
     /// rect: left; wand/by_color: sample point x.
     pub x: Option<i32>,
@@ -87,13 +98,93 @@ pub struct SelectArgs {
     pub dx: Option<i32>,
     /// move_pixels: vertical offset.
     pub dy: Option<i32>,
+    /// iso_tile: cell column (with row); alternative to x, y.
+    pub col: Option<i64>,
+    /// iso_tile: cell row (with col).
+    pub row: Option<i64>,
+    /// iso_tile: tile width in pixels, even, 4-4096 (default: the iso_grid setting, else 32).
+    pub tile_w: Option<i32>,
+    /// iso_tile: tile height in pixels, even, 4-4096 (default: the iso_grid setting, else 16).
+    pub tile_h: Option<i32>,
+    /// iso_tile: x of the grid's cell (0, 0) (default: the iso_grid setting, else 0).
+    pub offset_x: Option<i32>,
+    /// iso_tile: y of the grid's cell (0, 0) (default: the iso_grid setting, else 0).
+    pub offset_y: Option<i32>,
     /// Layer sampled by wand/by_color and edited by delete/move_pixels (default: active).
     pub layer: Option<Ref>,
     /// Frame (default: active).
     pub frame: Option<u32>,
 }
 
+fn grid_of(grid: Option<&Iso>) -> Iso {
+    grid.copied().unwrap_or_else(|| Iso::new(crate::iso::DEFAULT_W, crate::iso::DEFAULT_H, 0, 0))
+}
+
+/// Changes a setting the server keeps, not the document.
+const SETTING: Hints = Hints { read_only: false, destructive: false, idempotent: true, files: false };
+
+#[derive(Deserialize, JsonSchema, Clone, Copy, PartialEq, Eq, Default, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum IsoGridAction {
+    #[default]
+    Get,
+    Set,
+    Reset,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct IsoGridArgs {
+    /// get (default), set or reset.
+    pub action: Option<IsoGridAction>,
+    /// Document id (see doc_list); optional when only one document is open.
+    pub doc: Option<String>,
+    /// set: tile width in pixels (even, 4-4096).
+    pub tile_w: Option<i32>,
+    /// set: tile height in pixels (even, 4-4096).
+    pub tile_h: Option<i32>,
+    /// set: x of cell (0, 0)'s bounding box.
+    pub offset_x: Option<i32>,
+    /// set: y of cell (0, 0)'s bounding box.
+    pub offset_y: Option<i32>,
+}
+
+fn iso_grid(e: &mut Engine, a: IsoGridArgs) -> R<Out> {
+    let id = e.doc(&a.doc)?.id.clone();
+    let action = a.action.unwrap_or_default();
+    let has_values = a.tile_w.is_some() || a.tile_h.is_some() || a.offset_x.is_some() || a.offset_y.is_some();
+    if action != IsoGridAction::Set && has_values {
+        return Err("tile_w, tile_h, offset_x and offset_y need action set".into());
+    }
+    if action == IsoGridAction::Set && !has_values {
+        return Err("action `set` needs at least one of tile_w, tile_h, offset_x, offset_y".into());
+    }
+    match action {
+        IsoGridAction::Get => {}
+        IsoGridAction::Reset => {
+            e.iso_grids.remove(&id);
+        }
+        IsoGridAction::Set => {
+            let cur = grid_of(e.iso_grids.get(&id));
+            let g = Iso::new(
+                a.tile_w.unwrap_or(cur.w as i32),
+                a.tile_h.unwrap_or(cur.h as i32),
+                a.offset_x.unwrap_or(cur.x as i32),
+                a.offset_y.unwrap_or(cur.y as i32),
+            );
+            e.iso_grids.insert(id.clone(), g);
+        }
+    }
+    let g = grid_of(e.iso_grids.get(&id));
+    Out::json(json!({
+        "doc": id, "tile_w": g.w, "tile_h": g.h, "offset_x": g.x, "offset_y": g.y,
+        "is_default": !e.iso_grids.contains_key(&id),
+        "stored": "by this server, per document (not in the file or the app)",
+    }))
+}
+
 fn select(e: &mut Engine, a: SelectArgs) -> R<Out> {
+    let id = e.doc(&a.doc)?.id.clone();
+    let grid = e.iso_grids.get(&id).copied();
     let d = e.doc(&a.doc)?;
     let act = super::act(&a.action);
     let mode = a.mode.unwrap_or_default() as u32;
@@ -103,6 +194,7 @@ fn select(e: &mut Engine, a: SelectArgs) -> R<Out> {
         SelectAction::Polygon | SelectAction::Lasso => "Lasso Selection",
         SelectAction::Wand => "Magic Wand",
         SelectAction::ByColor => "Select Color",
+        SelectAction::IsoTile => "Select Isometric Tile",
         SelectAction::All => "Select All",
         SelectAction::None => "Deselect",
         SelectAction::Invert => "Invert Selection",
@@ -113,7 +205,43 @@ fn select(e: &mut Engine, a: SelectArgs) -> R<Out> {
         SelectAction::MovePixels => "Move",
         SelectAction::Crop => "Crop to Selection",
     };
+    let mut iso_info = None;
     match a.action {
+        SelectAction::IsoTile => {
+            let saved = grid_of(grid.as_ref());
+            let g = Iso::new(
+                a.tile_w.unwrap_or(saved.w as i32),
+                a.tile_h.unwrap_or(saved.h as i32),
+                a.offset_x.unwrap_or(saved.x as i32),
+                a.offset_y.unwrap_or(saved.y as i32),
+            );
+            let cell = match (a.col, a.row, a.x, a.y) {
+                (Some(c), Some(r), None, None) => (c, r),
+                (None, None, Some(x), Some(y)) => g.cell_at(x, y),
+                _ => {
+                    return Err(
+                        "action `iso_tile` needs either `x` and `y` (a pixel inside the cell) or `col` and `row`"
+                            .into(),
+                    );
+                }
+            };
+            let poly = g.cell_polygon(cell);
+            if poly.is_empty() {
+                return Err(format!("cell ({}, {}) has no pixels", cell.0, cell.1));
+            }
+            let flat: Vec<i32> = poly.iter().flat_map(|p| [p.0, p.1]).collect();
+            d.edit(label, Undo::Step, |_| {
+                unsafe {
+                    sel::pixmith_sel_begin(raw, mode);
+                    sel::pixmith_sel_poly(raw, flat.as_ptr(), poly.len());
+                    sel::pixmith_sel_end(raw);
+                }
+                Ok(())
+            })?;
+            iso_info = Some(
+                json!({ "col": cell.0, "row": cell.1, "tile_w": g.w, "tile_h": g.h, "offset_x": g.x, "offset_y": g.y }),
+            );
+        }
         SelectAction::Rect => {
             let (x, y) = (need(a.x, "x", &act)?, need(a.y, "y", &act)?);
             let (w, h) = (need(a.w, "w", &act)?, need(a.h, "h", &act)?);
@@ -212,6 +340,9 @@ fn select(e: &mut Engine, a: SelectArgs) -> R<Out> {
     let mut v = super::docs::selection_json(d);
     v["doc"] = json!(d.id);
     v["canvas"] = json!([d.doc.width(), d.doc.height()]);
+    if let Some(i) = iso_info {
+        v["iso_cell"] = i;
+    }
     Out::json(v)
 }
 

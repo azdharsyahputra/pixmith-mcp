@@ -16,6 +16,7 @@ engine in-process; every tool call edits real documents with the same code the d
 ## Conventions
 - Documents have ids ("d1", "d2", ...) from doc_new / doc_open (in the Pixmith app: "app:<id>", see Live mode).
   `doc` may be omitted when only one is open (with the app connected: the app's active document).
+- Files: with --root every path must be inside it; --allow-dir folders (e.g. a temp dir) additionally take reads and export output.
 - Pixel coordinates are 0-based from the top-left. Rectangles are {x, y, w, h}; shape corners are inclusive.
 - Layers are 0-based with 0 at the BOTTOM of the stack; a group appears right below its children. Layers can
   also be addressed by exact name. Frames are 0-based. (Lua scripts are 1-based for layers/frames/tags.)
@@ -72,16 +73,18 @@ engine in-process; every tool call edits real documents with the same code the d
   Pixmith Live Link addon (debug builds) updates its sprites after every edit you make, no re-export. game_screenshot
   returns a screenshot of that running game (scale 1-8 enlarges small pixel games) so you can check the result.
 - Replace one layer's pixels from a PNG in one undo step: layer action import_png with replace=true (path, layer, frame,
-  optional x / y). More how-tos per tool group: help topics documents, layers, drawing, selection, transform, filters,
-  tilemaps, slices, tween, export, history, live.
+  optional x / y). More how-tos per tool group: help topics app_tools (the app's tool names), documents, layers, drawing, selection,
+  transform, filters, tilemaps, slices, tween, export, history, live.
 - Anything else: run_lua (see help topic lua_api); timeout_seconds (1-120) allows longer scripts.
 "##;
 
 const DOCUMENTS: &str = r##"# Documents (doc_new, doc_open, doc_save, doc_close, doc_list, doc_info, doc_set_active)
 - doc_new {width, height, name?, background?, color_mode?, palette_preset?}; doc_open {path} reads .pxmt / .aseprite and
   imports .png, .gif, sprite sheets (cell_width / cell_height) and Aseprite JSON sheets. Both return the document id.
-- doc_save {path?, copy?}: .pxmt keeps everything, .aseprite / .ase for Aseprite; copy=true leaves the document as is.
-  Use export for PNG / GIF / sheets.
+- doc_save {path?, copy?, replace?}: .pxmt keeps everything, .aseprite / .ase for Aseprite; copy=true leaves the document as is.
+  Without path an imported document (PNG, GIF, sheet) is saved next to the imported file as <name>.pxmt (the result says where).
+  The app refuses to save to a file another tab has open: replace=true closes that tab first when it has no unsaved changes.
+  Use export for PNG / GIF / sheets (export may also write into a folder given with the server's --allow-dir).
 - doc_close {doc} refuses unsaved changes unless discard_changes=true. doc_close {all_headless: true} closes every
   headless document (d1, d2, ...) at once and keeps the unsaved ones unless discard_changes=true.
 - Headless documents are limited to 32: when doc_new / doc_open would pass that, the oldest unmodified (saved or never
@@ -92,29 +95,36 @@ const DOCUMENTS: &str = r##"# Documents (doc_new, doc_open, doc_save, doc_close,
 
 const LAYERS: &str = r##"# Layers, frames, cels and tags (layer, frame, cel, tag)
 - layer {action}: add, add_group, duplicate, remove (alias delete), move_up / move_down / move_to, into_group /
-  out_of_group / wrap_in_group, merge_down, set {name, visible, opacity, blend_mode}, import_png {path}.
+  out_of_group / wrap_in_group, merge_down, set {name, visible, opacity, blend_mode}, import_png {path}, import_sheet
+  {path, cell_width, cell_height, layer | new_layer, frame}: cuts a sprite sheet into consecutive frames (created as needed) of
+  a layer in one undo step.
 - Replace the pixels of an existing layer from a PNG in ONE undo step: layer {action: "import_png", layer, frame, path,
   replace: true, x?, y?}. Name, order, opacity and blend mode stay; without replace a new layer is added.
 - frame {action}: add, duplicate, remove (alias delete), move, set_duration {duration_ms, frame | frames | all}.
 - cel {action}: link, unlink, set_opacity, clear (aliases remove, delete), copy, paste, move; cels are one layer in one frame.
+  copy / paste / move return {copied|pasted|moved: {layers: [a, b], frames: [a, b], cels: n}} and a summary line.
 - tag {action}: add {name, from, to, direction?, repeat?, color?}, update, remove (alias delete).
 - Layer 0 is the bottom, frames are 0-based, layers can be given by name. New layers and frames become active.
 "##;
 
-const DRAWING: &str = r##"# Drawing (draw_pixels, draw_shape, draw_polygon, draw_curve, draw_stroke, fill, spray, gradient, draw_text, brush)
+const DRAWING: &str = r##"# Drawing (draw_pixels, draw_shape, draw_polygon, draw_curve, draw_stroke, fill, spray, retouch, gradient, draw_text, brush)
 - They take optional doc, layer and frame, a color ("#RRGGBB[AA]", names, "transparent" erases) and, where it makes
   sense, brush_size / brush_shape, ink (simple, alpha, lock_alpha, behind, shading) and mirror (horizontal / vertical /
   both); see each tool's schema.
 - Use draw_pixels for exact batches ({pixels: [{x, y, color}]} or points + one color), draw_shape for lines, rectangles
   and ellipses (filled or outline), draw_polygon / draw_curve / draw_stroke for paths (pixel_perfect for clean lines).
-- fill is the paint bucket (contiguous or global, tolerance, dither pattern); gradient and spray respect the selection.
+- fill is the Paint Bucket (contiguous or global, tolerance, dither pattern); gradient and spray respect the selection.
+- draw_stroke is the Pencil and, with color "transparent", the Eraser. retouch is the Blur and Jumble brushes (kind, points,
+  size, strength; one undo step). The full app-tool to MCP-call table is help topic app_tools.
 - With a selection active only selected pixels change (select none clears it). Check results with render / get_pixels.
 - For anything bigger than a few hundred calls, write one run_lua script instead.
 "##;
 
-const SELECTION: &str = r##"# Selection and clipboard (select, clipboard)
-- select {action}: rect, polygon, lasso, wand, by_color, all, none, invert, expand, contract, border; mode replace / add /
+const SELECTION: &str = r##"# Selection and clipboard (select, iso_grid, clipboard)
+- select {action}: rect (Marquee), polygon (Polygonal Lasso), lasso, wand (Magic Wand), by_color, iso_tile (Isometric Tile:
+  x, y or col, row; tile_w / tile_h default 32 x 16; offset_x / offset_y), all, none, invert, expand, contract, border; mode replace / add /
   subtract. delete clears the selected pixels, move_pixels shifts them, crop crops the canvas to the selection.
+- iso_grid {action: get | set | reset, tile_w, tile_h, offset_x, offset_y}: the document's isometric grid, the default of select iso_tile.
 - clipboard {action}: copy, cut, paste, paste_image (from a PNG file), move {dx, dy}, commit, cancel. A paste is a
   floating selection until committed; the next edit commits it too.
 - Drawing, fills, gradients and filters only touch selected pixels while a selection exists.
@@ -188,6 +198,71 @@ const LIVE: &str = r##"# Live mode (app_status, app_connect, app_disconnect, gam
 - game_screenshot returns the running Godot game (Live Link addon, Pixmith 0.5.1+).
 "##;
 
+const APP_TOOLS: &str = r##"# Pixmith app tools -> MCP calls
+Each line: what the app calls it -> the MCP call (example). Coordinates are canvas pixels; colors "#RRGGBB[AA]".
+
+## Select and move
+- Rectangular Marquee -> select {action: "rect", x: 2, y: 2, w: 8, h: 6}
+- Lasso -> select {action: "lasso", points: [[2,2],[9,3],[5,9]]}
+- Polygonal Lasso -> select {action: "polygon", points: [[2,2],[9,3],[5,9]]}
+- Magic Wand -> select {action: "wand", x: 4, y: 4, tolerance: 0, contiguous: true}; Select by Color -> select {action: "by_color", x, y}
+- Select > Isometric Tile -> select {action: "iso_tile", x: 32, y: 16} or {col: 1, row: 0}; the grid is the document's iso_grid {action: "set", tile_w: 96, tile_h: 48, offset_x: 592, offset_y: 360} (default 32 x 16 at 0, 0; kept by this server per document, not read from the app), or pass tile_w / tile_h / offset_x / offset_y to one call
+- Add / subtract with Shift / Alt -> mode: "add" | "subtract" on any select action; Select All / Deselect / Invert -> select all | none | invert
+- Select > Modify (Expand, Contract, Border) -> select {action: "expand", amount: 2}
+- Move (move the selected pixels) -> select {action: "move_pixels", dx: 3, dy: 0}; move a floating paste -> clipboard {action: "move", dx, dy}
+- Cut / Copy / Paste -> clipboard {action: "copy" | "cut" | "paste" | "commit"}; Delete -> select {action: "delete"}; Crop to Selection -> select {action: "crop"}
+- Free Transform -> free_transform {action: "begin"}, then {action: "set", angle: 15}, then {action: "commit"}; Flip / Rotate 90 -> transform {action: "flip_horizontal"}
+
+## Paint
+- Pencil -> draw_stroke {points: [[1,1],[6,4]], color: "#ff0000"} (single pixels: draw_pixels {points, color})
+- Eraser -> the same call with color "transparent"; erase a region: select it, then select {action: "delete"}
+- Spray -> spray {points: [[8,8]], color, radius: 4, density: 20, seed: 1}
+- Blur and Jumble -> retouch {kind: "blur" | "jumble", points: [[2,2],[12,2]], size: 5, strength: 50, seed?}
+- Paint Bucket -> fill {x, y, color, contiguous: true, tolerance: 0, pattern?}
+- Gradient -> gradient {from: [0,0], to: [0,15], color_from, color_to, kind: "linear" | "radial", dither?}
+
+## Shapes and text
+- Line / Rectangle / Ellipse -> draw_shape {shape: "line" | "rectangle" | "ellipse", from, to, color, filled?}
+- Curve -> draw_curve {points: [start, control1, control2, end], color}
+- Polygon -> draw_polygon {points: [[1,1],[8,2],[4,9]], color, filled?, closed?}
+- Contour (freehand outline, filled) -> draw_polygon {points: <the traced path>, color, filled: true}
+- Text -> draw_text {text: "HI", x, y, color, scale?}
+- Eyedropper -> get_pixel {x, y} (composite plus every layer's value); a whole area: get_pixels
+- Slice -> slice {action: "add", name, bounds: {x, y, w, h}}
+
+## Tool options
+- Ink modes Simple / Alpha Compositing / Lock Alpha / Behind / Shading -> ink: "simple" | "alpha" | "lock_alpha" | "behind" | "shading" (+ shading_ramp) on any draw_* call, fill, spray and gradient
+- Pixel-perfect Pencil -> pixel_perfect: true on draw_stroke
+- Symmetry (Mirror Horizontally / Vertically) -> mirror: "horizontal" | "vertical" | "both"
+- Brush size / Round Brush -> brush_size: 1-64, brush_shape: "circle" (retouch takes `size`)
+- Custom brush (Brush from Selection, Reset Brush) -> select pixels, then brush {action: "capture"}; brush {action: "reset"}
+- Filled Shapes -> filled: true; Contiguous Fill -> contiguous on fill
+
+## Sprite, layers, animation
+- Layers / groups / blend modes -> layer {action: "add" | "set" | "merge_down" | ...}; Frames -> frame; Cels and links -> cel (copy / paste / move report the block as {copied|pasted|moved: {layers: [a, b], frames: [a, b], cels: n}}); Tags -> tag
+- Sprite sheet PNG into consecutive frames of a layer -> layer {action: "import_sheet", path, cell_width: 32, cell_height: 32, layer, frame: 0, new_layer?}
+- Palette, color mode, Snap Pixels to Palette -> palette, color_mode; Sprite > Canvas Size -> sprite_size; FX menu -> filter
+- Tween -> tween; User Data -> user_data
+- Onion Skin -> render {onion_skin: {before: 1, after: 1}} (a view only: it never changes the document)
+- History panel -> history, history_goto, undo, redo; File > Scripts -> run_lua (help topic lua_api)
+
+## Tilemaps
+- Tilemap layers and Tile Stamp mode -> tilemap {action: "add_layer" | "stamp" | ...}, tileset
+- Terrain brush -> terrain (setup), terrain_paint {action: "paint", points}
+
+## Files, Godot and Live Link
+- File > Open / New / Save / Import -> doc_open (.pxmt, .aseprite, PNG, GIF, sheets), doc_new, doc_save (an imported, never saved document is saved next to the imported file as .pxmt; replace: true first closes another clean tab that has the target file open)
+- Export PNG / GIF / APNG / PNG sequence / Sprite Sheet -> export {format}
+- Export to Godot / Export Tileset to Godot -> export_godot, export_godot_tileset (preview: true to dry-run)
+- Live Link (running Godot game) -> export_godot {save_settings: true} once, then game_screenshot; the Pixmith app itself -> app_status, app_connect
+
+## View-only in the app (no effect on the document, nothing to call)
+- Grid, Isometric Grid display, Tiled Mode, Preview, zoom, View Options, Preferences. render shows only onion_skin of these. For the isometric grid, select iso_tile gives the cells' pixel masks.
+
+## Not available through this server
+- Reference layers (New Reference Layer, Show Reference Image), Assign sRGB / Remove Profile, export or import of WebP, JPEG, BMP, TGA, ICO, PCX and FLC (PNG, GIF, APNG and .aseprite only), plugin commands and keyboard shortcut editing.
+"##;
+
 pub fn tools() -> Vec<ToolDef> {
     vec![tool!(
         "Help",
@@ -196,7 +271,7 @@ pub fn tools() -> Vec<ToolDef> {
         READ,
         HelpArgs,
         help,
-        "Documentation for using this server: guide (conventions and workflows — read this first), lua_api (the full Lua scripting reference for run_lua), lua_examples (example scripts shipped with Pixmith), palettes (palette and color mode tools, built-in preset names), tools (one line per tool), and short how-tos per tool group: documents, layers, drawing, selection, transform, filters, tilemaps, slices, tween, export, history, live."
+        "Documentation for using this server: guide (conventions and workflows — read this first), lua_api (the full Lua scripting reference for run_lua), lua_examples (example scripts shipped with Pixmith), palettes (palette and color mode tools, built-in preset names), tools (one line per tool), app_tools (every tool of the Pixmith app - Pencil, Eraser, Paint Bucket, Blur, Marquee, Isometric Tile, ink modes, ... - mapped to its MCP call), and short how-tos per tool group: documents, layers, drawing, selection, transform, filters, tilemaps, slices, tween, export, history, live."
     )]
 }
 
@@ -208,6 +283,7 @@ pub enum Topic {
     LuaExamples,
     Palettes,
     Tools,
+    AppTools,
     Documents,
     Layers,
     Drawing,
@@ -224,7 +300,7 @@ pub enum Topic {
 
 #[derive(Deserialize, JsonSchema)]
 pub struct HelpArgs {
-    /// guide (default), lua_api, lua_examples, palettes, tools, or a tool group: documents, layers, drawing, selection,
+    /// guide (default), lua_api, lua_examples, palettes, tools, app_tools (the Pixmith app's tools/menu items mapped to MCP calls), or a tool group: documents, layers, drawing, selection,
     /// transform, filters, tilemaps, slices, tween, export, history, live.
     pub topic: Option<Topic>,
 }
@@ -263,6 +339,7 @@ fn topic_text(t: Topic) -> String {
             super::docs::preset_names().join("\n- ")
         ),
         Topic::Tools => tools_text(),
+        Topic::AppTools => APP_TOOLS.to_string(),
         Topic::Documents => DOCUMENTS.to_string(),
         Topic::Layers => LAYERS.to_string(),
         Topic::Drawing => DRAWING.to_string(),
@@ -286,12 +363,13 @@ fn help(_: &mut Engine, a: HelpArgs) -> R<Out> {
 mod tests {
     use super::*;
 
-    const ALL: [Topic; 17] = [
+    const ALL: [Topic; 18] = [
         Topic::Guide,
         Topic::LuaApi,
         Topic::LuaExamples,
         Topic::Palettes,
         Topic::Tools,
+        Topic::AppTools,
         Topic::Documents,
         Topic::Layers,
         Topic::Drawing,

@@ -33,7 +33,7 @@ pub fn tools() -> Vec<ToolDef> {
             WRITE_FILES,
             GodotArgs,
             export_godot,
-            "Export a Godot 4 SpriteFrames resource (.tres, one animation per tag, durations kept) plus its atlas PNG(s), optionally an AnimatedSprite2D scene (.tscn), into a Godot project. `project_root` is the folder containing project.godot and `tres_path` must be inside it. Re-exporting keeps resource uids stable. Without project_root/tres_path the settings saved in the document are used (save_settings=true stores the ones you pass). preview=true writes nothing and returns the .tres text, the files it would write and the first atlas page as an image. Live Link: export once with save_settings=true so the document knows its res:// resource; after that a game running the Pixmith Live Link addon (godot/addons/pixmith_live_link in the Pixmith repository, debug builds only) updates its sprites after every edit, including edits made through this server, with no re-export or restart. Call game_screenshot to look at the running game. Live Link and the game view need the Pixmith app 0.5.1 or later."
+            "File > Export to Godot: export a Godot 4 SpriteFrames resource (.tres, one animation per tag, durations kept) plus its atlas PNG(s), optionally an AnimatedSprite2D scene (.tscn), into a Godot project. `project_root` is the folder containing project.godot and `tres_path` must be inside it. Re-exporting keeps resource uids stable. Without project_root/tres_path the settings saved in the document are used (save_settings=true stores the ones you pass). preview=true writes nothing and returns the .tres text, the files it would write and the first atlas page as an image. Live Link: export once with save_settings=true so the document knows its res:// resource; after that a game running the Pixmith Live Link addon (godot/addons/pixmith_live_link in the Pixmith repository, debug builds only) updates its sprites after every edit, including edits made through this server, with no re-export or restart. Call game_screenshot to look at the running game. Live Link and the game view need the Pixmith app 0.5.1 or later."
         ),
         tool!(
             "Export",
@@ -42,7 +42,7 @@ pub fn tools() -> Vec<ToolDef> {
             WRITE_FILES,
             TilesetArgs,
             export_godot_tileset,
-            "Export a tileset as a Godot 4 TileSet resource (.tres) with its atlas PNG, including the terrain set and peering bits from terrain auto-tiling (or `mode` when there is none), flipped alternatives and optional collision shapes; write_scene=true also writes a .tscn with TileMapLayer nodes painted from the document's tilemap layers. preview=true describes the export without writing."
+            "File > Export Tileset to Godot: export a tileset as a Godot 4 TileSet resource (.tres) with its atlas PNG, including the terrain set and peering bits from terrain auto-tiling (or `mode` when there is none), flipped alternatives and optional collision shapes; write_scene=true also writes a .tscn with TileMapLayer nodes painted from the document's tilemap layers. preview=true describes the export without writing."
         ),
     ]
 }
@@ -141,7 +141,7 @@ fn written_files(base: &Path, since: SystemTime) -> Vec<String> {
 }
 
 fn export(e: &mut Engine, a: ExportArgs) -> R<Out> {
-    let path = e.sandbox.write(&a.path)?;
+    let path = e.sandbox.write_export(&a.path)?;
     let d = e.doc(&a.doc)?;
     let raw = d.doc.raw();
     let tag = match &a.tag {

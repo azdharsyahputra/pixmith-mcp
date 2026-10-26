@@ -35,7 +35,7 @@ pub fn tools() -> Vec<ToolDef> {
             OPEN_FILES,
             OpenArgs,
             doc_open,
-            "Open a file as a new document and return its id plus a summary. Reads Pixmith documents (.pxmt) and Aseprite files (.aseprite/.ase), and imports PNG (one frame), animated GIF (frames + delays), a sprite sheet PNG cut into a grid (give cell_width/cell_height), or a sprite sheet with Aseprite JSON metadata (pass the .json; the PNG named in meta.image is used unless png_path is given). Imported documents have no save path until doc_save is called with one."
+            "Open a file as a new document and return its id plus a summary. Reads Pixmith documents (.pxmt) and Aseprite files (.aseprite/.ase), and imports PNG (one frame), animated GIF (frames + delays), a sprite sheet PNG cut into a grid (give cell_width/cell_height), or a sprite sheet with Aseprite JSON metadata (pass the .json; the PNG named in meta.image is used unless png_path is given). Imported documents have no .pxmt path yet; doc_save without `path` saves them next to the imported file (same name, .pxmt)."
         ),
         tool!(
             "Documents",
@@ -44,7 +44,7 @@ pub fn tools() -> Vec<ToolDef> {
             WRITE_FILES,
             SaveArgs,
             doc_save,
-            "Save the document. Without `path` it saves to where it was opened/last saved. The format follows the extension: .pxmt (Pixmith document, keeps everything) or .aseprite/.ase. Use the export tool for PNG/GIF/sheets. With copy=true it writes a copy and keeps the document's own path and unsaved state."
+            "Save the document. Without `path` it saves to where it was opened/last saved; a document made by an import (PNG, GIF, sheet) and never saved goes next to the imported file (same name, .pxmt), and the result says where. replace=true first closes another open document (an app tab in live mode) that has the target file open, if it has no unsaved changes; with unsaved changes the call fails and nothing is closed. The format follows the extension: .pxmt (Pixmith document, keeps everything) or .aseprite/.ase. Use the export tool for PNG/GIF/sheets. With copy=true it writes a copy and keeps the document's own path and unsaved state."
         ),
         tool!(
             "Documents",
@@ -298,10 +298,20 @@ fn sheet_image(json: &Path, sandbox: &crate::paths::Sandbox) -> R<PathBuf> {
 pub struct SaveArgs {
     /// Document id (see doc_list); optional when only one document is open.
     pub doc: Option<String>,
-    /// Destination (.pxmt, .aseprite or .ase). Default: the document's current path.
+    /// Destination (.pxmt, .aseprite or .ase). Default: the document's current path; for a document made by an
+    /// import (PNG, GIF, sheet) that was never saved: next to the imported file, same name, .pxmt.
     pub path: Option<String>,
     /// Write a copy only: the document keeps its path and unsaved state.
     pub copy: Option<bool>,
+    /// Live mode: the Pixmith app refuses to save to a file another tab has open. With replace=true that other tab
+    /// (or headless document) is closed first, but only when it has no unsaved changes (otherwise the call fails and
+    /// nothing is closed).
+    pub replace: Option<bool>,
+}
+
+/// Where an imported document is saved when no path is given: next to its source, same name, `.pxmt`.
+pub fn default_save_path(source: &Path) -> PathBuf {
+    source.with_extension("pxmt")
 }
 
 fn doc_save(e: &mut Engine, a: SaveArgs) -> R<Out> {
@@ -310,13 +320,17 @@ fn doc_save(e: &mut Engine, a: SaveArgs) -> R<Out> {
     let target = match (&a.path, &d.path) {
         (Some(p), _) => sandbox.write(p)?,
         (None, Some(p)) => sandbox.write(&p.to_string_lossy())?,
-        (None, None) => {
-            return Err(format!(
-                "document {} has no file yet; pass path (e.g. \"{}.pxmt\" or \"{}.aseprite\")",
-                d.id, d.name, d.name
-            ));
-        }
+        (None, None) => match &d.source {
+            Some(src) => sandbox.write(&default_save_path(src).to_string_lossy())?,
+            None => {
+                return Err(format!(
+                    "document {} has no file yet; pass path (e.g. \"{}.pxmt\" or \"{}.aseprite\")",
+                    d.id, d.name, d.name
+                ));
+            }
+        },
     };
+    let defaulted = a.path.is_none() && d.path.is_none();
     let ext = target.extension().map(|x| x.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
     if !matches!(ext.as_str(), "pxmt" | "aseprite" | "ase") {
         return Err(format!(
@@ -324,6 +338,29 @@ fn doc_save(e: &mut Engine, a: SaveArgs) -> R<Out> {
             show(&target)
         ));
     }
+    let (self_id, copy_only) = (d.id.clone(), a.copy.unwrap_or(false));
+    // replace=true: another headless document that has this file open and no unsaved changes is closed first;
+    // one with unsaved changes stops the save.
+    let mut closed_other = Vec::new();
+    if a.replace.unwrap_or(false) && !copy_only {
+        let holders: Vec<(String, bool)> = e
+            .docs
+            .iter()
+            .filter(|o| o.id != self_id && o.path.as_deref() == Some(target.as_path()))
+            .map(|o| (o.id.clone(), o.doc.is_dirty()))
+            .collect();
+        if let Some((id, _)) = holders.iter().find(|(_, dirty)| *dirty) {
+            return Err(format!(
+                "{} is open as {id} with unsaved changes, so replace did not close it and nothing was saved. Save it elsewhere or close it with discard_changes=true, then retry",
+                show(&target)
+            ));
+        }
+        for (id, _) in holders {
+            e.docs.retain(|o| o.id != id);
+            closed_other.push(id);
+        }
+    }
+    let d = e.doc(&Some(self_id))?;
     let c = cstr(&target.to_string_lossy());
     clear_error();
     if !unsafe { core::pixmith_save(d.doc.raw(), c.as_ptr()) } {
@@ -338,9 +375,14 @@ fn doc_save(e: &mut Engine, a: SaveArgs) -> R<Out> {
         }
     }
     let size = std::fs::metadata(&target).map(|m| m.len()).unwrap_or(0);
-    Out::json(
-        json!({ "doc": d.id, "saved": show(&target), "format": ext, "bytes": size, "copy": copy, "dirty": d.doc.is_dirty() }),
-    )
+    let mut v = json!({ "doc": d.id, "saved": show(&target), "format": ext, "bytes": size, "copy": copy, "dirty": d.doc.is_dirty() });
+    if defaulted {
+        v["note"] = json!(format!("no path given: saved next to the imported file as {}", show(&target)));
+    }
+    if !closed_other.is_empty() {
+        v["closed_documents"] = json!(closed_other);
+    }
+    Out::json(v)
 }
 
 #[derive(Deserialize, JsonSchema)]

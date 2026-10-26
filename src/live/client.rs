@@ -2,12 +2,18 @@
 
 use super::discovery::{Entry, PROTOCOL};
 use serde_json::{Value, json};
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
 use std::net::{SocketAddr, TcpStream};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Longest message the protocol allows.
 const MAX_LINE: u64 = 64 << 20;
+/// How long a request may take in all. The app answers a big `documents.apply` or `documents.open` only after it
+/// has decoded the document on its UI thread, which can take minutes for a large sheet.
+pub const ANSWER_TIMEOUT: Duration = Duration::from_secs(300);
+/// The socket's own timeout: one slice of waiting. A slice that ends without data (`WouldBlock` / `TimedOut`,
+/// "Resource temporarily unavailable (os error 35)") is not an error, the wait just goes on until the deadline.
+const SLICE: Duration = Duration::from_secs(1);
 
 pub const STALE: i64 = -32009;
 pub const BUSY: i64 = -32010;
@@ -64,9 +70,8 @@ impl Conn {
         let stream = TcpStream::connect_timeout(&addr, Duration::from_millis(750))
             .map_err(|e| format!("pid {} does not answer on port {}: {e}", entry.pid, entry.port))?;
         let _ = stream.set_nodelay(true);
-        let timeout = Some(Duration::from_secs(60));
-        let _ = stream.set_read_timeout(timeout);
-        let _ = stream.set_write_timeout(timeout);
+        let _ = stream.set_read_timeout(Some(SLICE));
+        let _ = stream.set_write_timeout(Some(SLICE));
         let mut conn = Conn {
             reader: BufReader::new(stream),
             next: 1,
@@ -112,16 +117,14 @@ impl Conn {
         self.next += 1;
         let line = serde_json::to_string(&json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }))
             .map_err(|e| RpcError::Io(e.to_string()))?;
+        let deadline = Instant::now() + ANSWER_TIMEOUT;
         let stream = self.reader.get_mut();
-        stream
-            .write_all(line.as_bytes())
-            .and_then(|_| stream.write_all(b"\n"))
-            .and_then(|_| stream.flush())
+        write_patiently(stream, line.as_bytes(), deadline)
+            .and_then(|_| write_patiently(stream, b"\n", deadline))
+            .and_then(|_| flush_patiently(stream, deadline))
             .map_err(|e| RpcError::Io(format!("cannot talk to the Pixmith app: {e}")))?;
         let mut buf = Vec::new();
-        let n = (&mut self.reader)
-            .take(MAX_LINE + 1)
-            .read_until(b'\n', &mut buf)
+        let n = read_line_patiently(&mut self.reader, &mut buf, deadline)
             .map_err(|e| RpcError::Io(format!("no answer from the Pixmith app: {e}")))?;
         if n == 0 {
             return Err(RpcError::Io("the Pixmith app closed the connection".into()));
@@ -141,6 +144,62 @@ impl Conn {
             });
         }
         Ok(v.get("result").cloned().unwrap_or(Value::Null))
+    }
+}
+
+fn waiting(kind: ErrorKind) -> bool {
+    matches!(kind, ErrorKind::WouldBlock | ErrorKind::TimedOut | ErrorKind::Interrupted)
+}
+
+fn too_slow() -> std::io::Error {
+    std::io::Error::new(
+        ErrorKind::TimedOut,
+        format!("the app did not answer within {} s (it may be busy or showing a dialog)", ANSWER_TIMEOUT.as_secs()),
+    )
+}
+
+/// `write_all` that keeps going when the socket's buffer is full (`WouldBlock`) until `deadline`.
+fn write_patiently(w: &mut impl Write, mut data: &[u8], deadline: Instant) -> std::io::Result<()> {
+    while !data.is_empty() {
+        match w.write(data) {
+            Ok(0) => return Err(ErrorKind::WriteZero.into()),
+            Ok(n) => data = &data[n..],
+            Err(e) if waiting(e.kind()) => {
+                if Instant::now() >= deadline {
+                    return Err(too_slow());
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
+fn flush_patiently(w: &mut impl Write, deadline: Instant) -> std::io::Result<()> {
+    loop {
+        match w.flush() {
+            Err(e) if waiting(e.kind()) && Instant::now() < deadline => std::thread::sleep(Duration::from_millis(5)),
+            Err(e) if waiting(e.kind()) => return Err(too_slow()),
+            r => return r,
+        }
+    }
+}
+
+/// `read_until(b'\n')` that keeps waiting through socket timeouts until `deadline`, keeping what arrived so far.
+/// Reads at most `MAX_LINE + 1` bytes.
+fn read_line_patiently(r: &mut impl BufRead, buf: &mut Vec<u8>, deadline: Instant) -> std::io::Result<usize> {
+    loop {
+        let room = (MAX_LINE + 1).saturating_sub(buf.len() as u64);
+        match r.take(room).read_until(b'\n', buf) {
+            Ok(_) => return Ok(buf.len()),
+            Err(e) if waiting(e.kind()) => {
+                if Instant::now() >= deadline {
+                    return Err(too_slow());
+                }
+            }
+            Err(e) => return Err(e),
+        }
     }
 }
 
@@ -202,4 +261,88 @@ impl AppDoc {
 /// `app:doc-3` -> `doc-3`.
 pub fn strip_prefix(id: &str) -> Option<&str> {
     id.trim().strip_prefix("app:")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A reader that reports `WouldBlock` before every chunk, like a socket whose timeout ran out.
+    struct Choppy {
+        chunks: Vec<Vec<u8>>,
+        block_next: bool,
+    }
+
+    impl Read for Choppy {
+        fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+            if self.block_next {
+                self.block_next = false;
+                return Err(ErrorKind::WouldBlock.into());
+            }
+            self.block_next = true;
+            if self.chunks.is_empty() {
+                return Ok(0);
+            }
+            let c = self.chunks.remove(0);
+            out[..c.len()].copy_from_slice(&c);
+            Ok(c.len())
+        }
+    }
+
+    #[test]
+    fn a_line_is_read_through_would_block_errors() {
+        let mut r = BufReader::with_capacity(
+            16,
+            Choppy { chunks: vec![b"{\"a\":".to_vec(), b"1}".to_vec(), b"\n".to_vec()], block_next: true },
+        );
+        let mut buf = Vec::new();
+        let n = read_line_patiently(&mut r, &mut buf, Instant::now() + Duration::from_secs(5)).unwrap();
+        assert_eq!(buf, b"{\"a\":1}\n");
+        assert_eq!(n, buf.len());
+    }
+
+    #[test]
+    fn waiting_past_the_deadline_is_a_timeout_not_a_would_block() {
+        // A reader that always blocks.
+        struct Never;
+        impl Read for Never {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(ErrorKind::WouldBlock.into())
+            }
+        }
+        let mut never = BufReader::new(Never);
+        let e = read_line_patiently(&mut never, &mut Vec::new(), Instant::now()).unwrap_err();
+        assert_eq!(e.kind(), ErrorKind::TimedOut);
+        assert!(e.to_string().contains("did not answer"), "{e}");
+    }
+
+    /// A writer that takes a few bytes at a time and says `WouldBlock` in between.
+    struct Slow {
+        out: Vec<u8>,
+        block_next: bool,
+    }
+
+    impl Write for Slow {
+        fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+            if self.block_next {
+                self.block_next = false;
+                return Err(ErrorKind::WouldBlock.into());
+            }
+            self.block_next = true;
+            let n = data.len().min(3);
+            self.out.extend_from_slice(&data[..n]);
+            Ok(n)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_write_survives_would_block() {
+        let mut w = Slow { out: Vec::new(), block_next: true };
+        write_patiently(&mut w, b"hello world", Instant::now() + Duration::from_secs(5)).unwrap();
+        assert_eq!(w.out, b"hello world");
+    }
 }

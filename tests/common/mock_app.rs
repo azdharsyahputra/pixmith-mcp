@@ -59,6 +59,8 @@ pub struct State {
     pub game: bool,
     /// `game.capture` is unknown to this "older" app (-32601).
     pub no_game_view: bool,
+    /// Fail the next n `documents.apply` with a generic error (-32000), like an app that choked on a big document.
+    pub apply_fail_next: u32,
     /// Close every client connection (the listener stays up), like an app that dropped the socket.
     pub drop_connections: bool,
 }
@@ -147,6 +149,10 @@ fn handle(state: &mut State, method: &str, p: &Value) -> Result<Value, (i64, Str
             )
         }
         "documents.apply" => {
+            if state.apply_fail_next > 0 {
+                state.apply_fail_next -= 1;
+                return Err((-32000, "could not apply the document".into()));
+            }
             if state.busy_next > 0 {
                 state.busy_next -= 1;
                 return Err((-32010, "busy: a sheet is open".into()));
@@ -225,9 +231,25 @@ fn handle(state: &mut State, method: &str, p: &Value) -> Result<Value, (i64, Str
         }
         "documents.save" => {
             let i = state.find(p)?;
-            let d = &mut state.docs[i];
-            let path = p["path"].as_str().map(str::to_string).or_else(|| d.path.clone());
+            let path = p["path"].as_str().map(str::to_string).or_else(|| state.docs[i].path.clone());
             let Some(path) = path else { return Err((-32000, "the document has no file yet".into())) };
+            // Like the app: a file another tab has open cannot be saved to, unless `replace_open` closes a clean tab.
+            if let Some(o) =
+                state.docs.iter().position(|o| o.id != state.docs[i].id && o.path.as_deref() == Some(path.as_str()))
+            {
+                if p["replace_open"].as_bool().unwrap_or(false) && !state.docs[o].dirty {
+                    let id = state.docs.remove(o).id;
+                    state.active = state.docs.last().map(|d| d.id.clone());
+                    let _ = id;
+                } else {
+                    return Err((
+                        -32000,
+                        format!("“{}” is already open in another tab. Close that tab first.", state.docs[o].name),
+                    ));
+                }
+            }
+            let i = state.docs.iter().position(|d| d.id == p["id"].as_str().unwrap_or_default()).unwrap();
+            let d = &mut state.docs[i];
             pxmt::save_file(&path, &d.editor.sprite).map_err(|e| (-32000, e))?;
             d.path = Some(path);
             d.dirty = false;

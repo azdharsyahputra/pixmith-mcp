@@ -18,7 +18,7 @@ pub fn tools() -> Vec<ToolDef> {
             CHANGE,
             TransformArgs,
             transform,
-            "Flip or rotate the selected pixels, or the whole cel when nothing is selected: flip_horizontal, flip_vertical, rotate_cw / rotate_ccw / rotate_180 (exact 90-degree turns), or rotate by any `angle` in degrees (clockwise) with RotSprite resampling (keeps pixel-art edges crisp; rotsprite=false for nearest neighbour). all_frames / all_layers repeat it over frames / layers, all in one undo step."
+            "Edit > Flip Horizontal / Flip Vertical / Rotate 90: flip or rotate the selected pixels, or the whole cel when nothing is selected: flip_horizontal, flip_vertical, rotate_cw / rotate_ccw / rotate_180 (exact 90-degree turns), or rotate by any `angle` in degrees (clockwise) with RotSprite resampling (keeps pixel-art edges crisp; rotsprite=false for nearest neighbour). all_frames / all_layers repeat it over frames / layers, all in one undo step."
         ),
         tool!(
             "Transform",
@@ -27,7 +27,7 @@ pub fn tools() -> Vec<ToolDef> {
             CHANGE,
             XfArgs,
             free_transform,
-            "Interactive free transform of the selection (or cel), like Cmd-T in the app: begin, then set any of x, y, width, height, angle (degrees), skew_x, skew_y (the preview updates; `anchor` picks the fixed point for width/height), read the state with info, and commit (one undo step) or cancel. Any other edit also commits it."
+            "The Free Transform tool (Edit menu) for the selection (or cel): begin, then set any of x, y, width, height, angle (degrees), skew_x, skew_y (the preview updates; `anchor` picks the fixed point for width/height), read the state with info, and commit (one undo step) or cancel. Any other edit also commits it."
         ),
         tool!(
             "Transform",
@@ -36,7 +36,7 @@ pub fn tools() -> Vec<ToolDef> {
             CHANGE,
             SizeArgs,
             sprite_size,
-            "Resize the whole sprite (all layers and frames): `scale` resamples the pixels (nearest neighbour) to width x height (or by `factor`); `canvas` changes the canvas size without scaling, placing the old image by `anchor` (default center) or explicit offset_x/offset_y (where the old top-left lands; negative crops)."
+            "Sprite > Canvas Size and sprite scaling: resize the whole sprite (all layers and frames): `scale` resamples the pixels (nearest neighbour) to width x height (or by `factor`); `canvas` changes the canvas size without scaling, placing the old image by `anchor` (default center) or explicit offset_x/offset_y (where the old top-left lands; negative crops)."
         ),
     ]
 }

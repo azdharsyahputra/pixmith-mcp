@@ -34,7 +34,7 @@ pub fn tools() -> Vec<ToolDef> {
             CHANGE,
             TilemapArgs,
             tilemap,
-            "Tilemap layers: add_layer (new tilemap layer + tileset with tile_width x tile_height tiles, above `layer`), convert (turn an image layer into a tilemap, deduplicating tiles; flip_aware shares flipped copies), to_image (back to a normal layer), assign_tileset (use another tileset of the same tile size), stamp (place `tile` at canvas pixel x, y, optional flip_x / flip_y / diagonal; tile 0 clears), get_tile, grid (the layer's tile indices as rows, read-only)."
+            "Tilemap layers: add_layer (new tilemap layer + tileset with tile_width x tile_height tiles, above `layer`), convert (turn an image layer into a tilemap, deduplicating tiles; flip_aware shares flipped copies), to_image (back to a normal layer), assign_tileset (use another tileset of the same tile size), stamp (the Tile Stamp mode: place `tile` at canvas pixel x, y, optional flip_x / flip_y / diagonal; tile 0 clears), get_tile, grid (the layer's tile indices as rows, read-only)."
         ),
         tool!(
             "Tilemaps",
@@ -52,7 +52,7 @@ pub fn tools() -> Vec<ToolDef> {
             ADD,
             PaintArgs,
             terrain_paint,
-            "Paint terrain with the auto-tiling brush on a tilemap layer (the right tiles are chosen from the masks): paint (canvas pixel `points`, optional brush_size/round/mirror), rect (x, y, w, h), flood (fill the connected area at x, y), erase (paint terrain 0), override (force `tile` at x, y; 0 removes the override), pick (read the terrain at x, y). One undo step per call."
+            "The terrain brush: paint terrain with the auto-tiling brush on a tilemap layer (the right tiles are chosen from the masks): paint (canvas pixel `points`, optional brush_size/round/mirror), rect (x, y, w, h), flood (fill the connected area at x, y), erase (paint terrain 0), override (force `tile` at x, y; 0 removes the override), pick (read the terrain at x, y). One undo step per call."
         ),
     ]
 }

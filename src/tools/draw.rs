@@ -6,7 +6,7 @@ use crate::color::Color;
 use crate::doc::cstr;
 use crate::engine::{DocEntry, Engine, R, Ref, Undo};
 use pixmith_core::Cel;
-use pixmith_core::paint::{curves, font, ink, shapes};
+use pixmith_core::paint::{curves, font, ink, retouch, shapes};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::json;
@@ -21,7 +21,7 @@ pub fn tools() -> Vec<ToolDef> {
             ADD,
             PixelsArgs,
             draw_pixels,
-            "Paint individual pixels (batch, up to 65536). Either give `pixels` as [{x, y, color}] or `points` as [[x, y], ...] with one `color`. Uses the brush and ink options (default: 1 px square brush, simple ink = replace the pixel; a transparent color erases)."
+            "Pencil for exact pixels: paint individual pixels (batch, up to 65536); painting color \"transparent\" is the Eraser. Either give `pixels` as [{x, y, color}] or `points` as [[x, y], ...] with one `color`. Uses the brush and ink options (default: 1 px square brush, simple ink = replace the pixel; a transparent color erases)."
         ),
         tool!(
             "Drawing",
@@ -30,7 +30,7 @@ pub fn tools() -> Vec<ToolDef> {
             ADD,
             ShapeArgs,
             draw_shape,
-            "Draw a line, rectangle or ellipse between two points (`from`, `to`; for rectangles and ellipses they are opposite corners of the bounding box, inclusive). `filled` fills rectangles and ellipses. Brush, ink and mirror options apply."
+            "The Line, Rectangle and Ellipse tools: draw a line, rectangle or ellipse between two points (`from`, `to`; for rectangles and ellipses they are opposite corners of the bounding box, inclusive). `filled` fills rectangles and ellipses. Brush, ink and mirror options apply."
         ),
         tool!(
             "Drawing",
@@ -39,7 +39,7 @@ pub fn tools() -> Vec<ToolDef> {
             ADD,
             PolygonArgs,
             draw_polygon,
-            "Draw a polygon through `points` ([[x, y], ...], at least 2). Closed by default; `filled` fills it; closed=false draws an open polyline."
+            "The Polygon tool, and the Contour tool (freehand outline: pass the traced points with filled=true): draw a polygon through `points` ([[x, y], ...], at least 2). Closed by default; `filled` fills it; closed=false draws an open polyline."
         ),
         tool!(
             "Drawing",
@@ -48,7 +48,7 @@ pub fn tools() -> Vec<ToolDef> {
             ADD,
             CurveArgs,
             draw_curve,
-            "Draw a cubic Bezier curve: `points` = [start, control1, control2, end], each [x, y]."
+            "The Curve tool: draw a cubic Bezier curve: `points` = [start, control1, control2, end], each [x, y]."
         ),
         tool!(
             "Drawing",
@@ -57,7 +57,16 @@ pub fn tools() -> Vec<ToolDef> {
             ADD,
             StrokeArgs,
             draw_stroke,
-            "Draw a freehand pencil stroke along a path of points ([[x, y], ...]); consecutive points are joined. pixel_perfect removes the doubled corner pixels of diagonal strokes (classic pixel-art pencil)."
+            "The Pencil and Eraser tools: draw a freehand stroke along a path of points ([[x, y], ...]); consecutive points are joined. To use the Eraser, pass color \"transparent\". pixel_perfect is the Pixel-perfect Pencil option (removes the doubled corner pixels of diagonal strokes). Also: brush_size, brush_shape circle (Round Brush), a captured custom brush (brush tool), ink (Simple, Alpha, Lock Alpha, Behind, Shading) and mirror (symmetry horizontal / vertical / both)."
+        ),
+        tool!(
+            "Drawing",
+            "retouch",
+            "Blur / Jumble brush",
+            CHANGE,
+            RetouchArgs,
+            retouch,
+            "The app's Blur and Jumble brushes: rework the pixels under a brush stroke along `points` instead of painting a color. kind blur smooths each pixel with its 3x3 neighbours (alpha-aware), mixed by `strength` 1-100; jumble swaps pixels with random ones nearby (about size/2 away), each with probability `strength`%, repeatable with `seed`. `size` is the brush size 1-64; brush_shape circle, a captured custom brush and mirror apply; ink and colors do not. Clipped to the selection; one undo step per call."
         ),
         tool!(
             "Drawing",
@@ -66,7 +75,7 @@ pub fn tools() -> Vec<ToolDef> {
             CHANGE,
             FillArgs,
             fill,
-            "Paint-bucket fill at (x, y). contiguous=true (default) fills the connected area of the clicked color; false replaces that color everywhere in the cel. tolerance 0-255 also takes colors whose channels differ by at most that much. Optional dither `pattern` between `color` and `color2`. Fills only inside the selection when there is one."
+            "The Paint Bucket tool: fill at (x, y). contiguous=true (default) fills the connected area of the clicked color; false replaces that color everywhere in the cel. tolerance 0-255 also takes colors whose channels differ by at most that much. Optional dither `pattern` between `color` and `color2`. Fills only inside the selection when there is one."
         ),
         tool!(
             "Drawing",
@@ -75,7 +84,7 @@ pub fn tools() -> Vec<ToolDef> {
             ADD,
             SprayArgs,
             spray,
-            "Spray-paint random pixels in a circle of `radius` around each point; `density` 1-100 controls how many pixels per puff, `seed` makes it repeatable."
+            "The Spray tool: spray-paint random pixels in a circle of `radius` around each point; `density` 1-100 controls how many pixels per puff, `seed` makes it repeatable."
         ),
         tool!(
             "Drawing",
@@ -84,7 +93,7 @@ pub fn tools() -> Vec<ToolDef> {
             CHANGE,
             GradientArgs,
             gradient,
-            "Fill the selection (or the whole cel) with a linear or radial gradient from `from` to `to`, `color_from` to `color_to`; dither 2/4/8 uses an ordered Bayer pattern instead of smooth blending (pixel-art style)."
+            "The Gradient tool: fill the selection (or the whole cel) with a linear or radial gradient from `from` to `to`, `color_from` to `color_to`; dither 2/4/8 uses an ordered Bayer pattern instead of smooth blending (pixel-art style)."
         ),
         tool!(
             "Drawing",
@@ -93,7 +102,7 @@ pub fn tools() -> Vec<ToolDef> {
             ADD,
             TextArgs,
             draw_text,
-            "Write text with the built-in 5x8 pixel font, top-left at (x, y); each font pixel becomes scale x scale pixels. Returns the text's size. With measure_only=true nothing is drawn."
+            "The Text tool: write text with the built-in 5x8 pixel font, top-left at (x, y); each font pixel becomes scale x scale pixels. Returns the text's size. With measure_only=true nothing is drawn."
         ),
         tool!(
             "Drawing",
@@ -102,7 +111,7 @@ pub fn tools() -> Vec<ToolDef> {
             BRUSH,
             BrushArgs,
             brush,
-            "Custom brush: `capture` turns the selected pixels of a layer into the brush used by every later drawing call (until `reset`); `info` reports it. The brush is shared by all documents."
+            "Custom brush (Brush from Selection / Reset Brush): `capture` turns the selected pixels of a layer into the brush used by every later drawing call (until `reset`); `info` reports it. The brush is shared by all documents."
         ),
     ]
 }
@@ -397,6 +406,53 @@ fn draw_stroke(e: &mut Engine, a: StrokeArgs) -> R<Out> {
             unsafe { shapes::pixmith_stroke_to(raw, p[0], p[1]) };
         }
         shapes::pixmith_stroke_end_doc(raw);
+    })
+}
+
+#[derive(Deserialize, JsonSchema, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum RetouchKind {
+    Blur,
+    Jumble,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct RetouchArgs {
+    /// blur or jumble.
+    pub kind: RetouchKind,
+    /// Path [[x, y], ...] (1-65536 points); consecutive points are joined by a line of dabs.
+    pub points: Vec<[i32; 2]>,
+    /// Brush size in pixels, 1-64 (default: brush_size, else 3).
+    pub size: Option<u32>,
+    /// Effect strength in percent, 1-100 (default 50). Blur: mix with the neighbourhood average. Jumble: chance each pixel is swapped.
+    pub strength: Option<u32>,
+    /// jumble: random seed (default 1). The same seed gives the same result.
+    pub seed: Option<u32>,
+    #[serde(flatten)]
+    pub paint: Paint,
+}
+
+fn retouch(e: &mut Engine, a: RetouchArgs) -> R<Out> {
+    if a.points.is_empty() || a.points.len() > 65536 {
+        return Err("a retouch stroke needs 1-65536 points".into());
+    }
+    let size = a.size.or(a.paint.brush_size).unwrap_or(3).clamp(1, 64);
+    let strength = a.strength.unwrap_or(50).clamp(1, 100);
+    let seed = a.seed.unwrap_or(1);
+    let kind = match a.kind {
+        RetouchKind::Blur => retouch::KIND_BLUR,
+        RetouchKind::Jumble => retouch::KIND_JUMBLE,
+    };
+    let flags = a.paint.flags();
+    let label = if a.kind == RetouchKind::Blur { "Blur" } else { "Jumble" };
+    paint_op(e, &a.paint, label, |d, l, f| {
+        let raw = d.doc.raw();
+        let p0 = a.points[0];
+        unsafe { retouch::pixmith_retouch_begin(raw, l, f, p0[0], p0[1], kind, size, strength, seed, flags) };
+        for p in &a.points[1..] {
+            unsafe { retouch::pixmith_retouch_to(raw, p[0], p[1]) };
+        }
+        retouch::pixmith_retouch_end_doc(raw);
     })
 }
 
