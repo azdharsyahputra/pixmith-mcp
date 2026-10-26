@@ -337,3 +337,46 @@ fn run_lua_timeout_seconds_raises_the_limits() {
     }
     assert!(lua["description"].as_str().unwrap().contains("timeout_seconds"));
 }
+
+#[test]
+fn run_lua_reaches_files_only_inside_allow_paths() {
+    let mut c = Client::start(&[]);
+    c.ok("doc_new", json!({ "width": 8, "height": 8 }));
+    let work = c.path("work");
+    std::fs::create_dir_all(&work).unwrap();
+    std::fs::write(work.join("in.txt"), "hello").unwrap();
+    let read = format!(
+        "local f = assert(io.open({:?}, 'r')) print(f:read('a')) f:close()",
+        work.join("in.txt").display().to_string()
+    );
+    // Without allow_paths nobody can approve the access, so it is denied and the document is unchanged.
+    let e = c.err("run_lua", json!({ "source": read }));
+    assert!(e.contains("script failed"), "{e}");
+    // Inside allow_paths: read and write work.
+    let r = c.ok("run_lua", json!({ "source": read, "allow_paths": [work.display().to_string()] }));
+    assert_eq!(r["output"], "hello", "{r}");
+    let write = format!(
+        "local f = assert(io.open({:?}, 'w')) f:write('out') f:close()",
+        work.join("out.txt").display().to_string()
+    );
+    c.ok("run_lua", json!({ "source": write, "allow_paths": [work.display().to_string()] }));
+    assert_eq!(std::fs::read_to_string(work.join("out.txt")).unwrap(), "out");
+    // A sibling folder stays closed.
+    let other = c.path("other");
+    std::fs::create_dir_all(&other).unwrap();
+    let outside = format!("assert(io.open({:?}, 'w'))", other.join("x.txt").display().to_string());
+    c.err("run_lua", json!({ "source": outside, "allow_paths": [work.display().to_string()] }));
+    assert!(!other.join("x.txt").exists());
+}
+
+#[test]
+fn run_lua_documents_made_by_the_script_become_headless_documents() {
+    let mut c = Client::start(&[]);
+    c.ok("doc_new", json!({ "width": 8, "height": 8 }));
+    let r = c.ok("run_lua", json!({ "source": "local s = Sprite(16, 12) app.activeSprite = s" }));
+    let created = r["new_documents"].as_array().expect("new_documents");
+    assert_eq!(created.len(), 1, "{r}");
+    let id = created[0].as_str().unwrap();
+    let info = c.ok("doc_info", json!({ "doc": id, "sections": [] }));
+    assert_eq!((info["width"].as_u64(), info["height"].as_u64()), (Some(16), Some(12)), "{info}");
+}

@@ -27,7 +27,7 @@ pub fn tools() -> Vec<ToolDef> {
         CHANGE,
         LuaArgs,
         run_lua,
-        "Run a Lua 5.4 script against a document (sandboxed: no io/os; 128 MB memory, 10 s by default, `timeout_seconds` 1-120 raises the time and the instruction budget with it; source up to 16 MiB) as ONE undo step; if it raises an error the document is left unchanged. The script sees `sprite` (pixels, layers, frames, cels, tags, slices, tilesets, selection, palette, user data), `app` and `color`; print() and app.alert() output is returned. NOTE: in Lua, layers/frames/tags are 1-based (layer 1 = bottom) while pixel coordinates and palette indices are 0-based; `sprite.activeLayer`/`activeFrame` are the document's active layer/frame. Read the full API with the help tool (topic lua_api) or the pixmith://docs/lua-api resource. Give `source` (aliases: `script`, `code`) or a .lua `path`."
+        "Run a Lua 5.4 script against a document (sandboxed: io / os / app.fs / file loading and saving only inside `allow_paths`, everything else is denied; 128 MB memory, 10 s by default, `timeout_seconds` 1-120 raises the time and the instruction budget with it; source up to 16 MiB) as ONE undo step; if it raises an error the document is left unchanged. The script sees `sprite` (pixels, layers, frames, cels, tags, slices, tilesets, selection, palette, user data), `app` and `color`; print() and app.alert() output is returned. NOTE: in Lua, layers/frames/tags are 1-based (layer 1 = bottom) while pixel coordinates and palette indices are 0-based; `sprite.activeLayer`/`activeFrame` are the document's active layer/frame. Read the full API with the help tool (topic lua_api) or the pixmith://docs/lua-api resource. Give `source` (aliases: `script`, `code`) or a .lua `path`."
     )]
 }
 
@@ -45,6 +45,9 @@ pub struct LuaArgs {
     pub path: Option<String>,
     /// Time limit in seconds, 1-120 (default 10). The instruction budget grows in proportion.
     pub timeout_seconds: Option<u32>,
+    /// Folders (or files) the script may read and write with io / os / app.fs / Image{fromFile} / app.open /
+    /// saveAs. Everything else is denied (there is nobody to ask). Must be inside the server's --root.
+    pub allow_paths: Option<Vec<String>>,
 }
 
 /// The core's default limits, with the time (and the instruction budget in proportion) set to `seconds`.
@@ -58,12 +61,17 @@ fn limits(seconds: Option<u64>) -> Limits {
 /// Runs `src` on the document (one undo step) with the core's default limits, returning its printed output.
 /// Updates the active layer/frame when the script assigned app.activeLayer / app.activeFrame.
 pub fn run(d: &mut DocEntry, src: &str) -> R<String> {
-    run_with_limits(d, src, Limits::default())
+    run_with_limits(d, src, Limits::default(), &scripting::RunConfig::default()).map(|r| r.0)
 }
 
 /// Like [`run`] with explicit limits (`pixmith_run_script_at` always uses the default ones, so this calls the
 /// core's `scripting::run_with` the same way that entry point does).
-pub fn run_with_limits(d: &mut DocEntry, src: &str, limits: Limits) -> R<String> {
+pub fn run_with_limits(
+    d: &mut DocEntry,
+    src: &str,
+    limits: Limits,
+    cfg: &scripting::RunConfig,
+) -> R<(String, Vec<scripting::NewDocument>)> {
     let raw = d.doc.raw();
     let (layer, frame) = (d.layer as usize, d.frame as usize);
     clear_error();
@@ -72,30 +80,39 @@ pub fn run_with_limits(d: &mut DocEntry, src: &str, limits: Limits) -> R<String>
         let ed: &mut Editor = unsafe { &mut *raw };
         ed.dirty.mark_all();
         let saved: Sprite = ed.sprite.clone();
-        let outcome =
-            match catch_unwind(AssertUnwindSafe(|| scripting::run_with(ed, src, (layer, frame), limits, &NO_CANCEL))) {
-                Ok(o) => o,
-                Err(_) => {
-                    ed.sprite = saved;
-                    return Err("internal error: the script crashed the scripting engine (document unchanged)".into());
-                }
-            };
+        let outcome = match catch_unwind(AssertUnwindSafe(|| {
+            scripting::run_in(ed, src, (layer, frame), limits, &NO_CANCEL, cfg)
+        })) {
+            Ok(o) => o,
+            Err(_) => {
+                ed.sprite = saved;
+                return Err("internal error: the script crashed the scripting engine (document unchanged)".into());
+            }
+        };
         let text = outcome.messages.join("\n");
         match outcome.error {
-            None => Ok((text, outcome.select)),
+            None => Ok((
+                text,
+                outcome.select,
+                outcome.new_documents,
+                outcome.original_saved.then_some(outcome.original_path).flatten(),
+            )),
             Some(err) => Err(format!(
                 "the script failed (document unchanged): {err}{}",
                 if text.is_empty() { String::new() } else { format!("; output before the error: {text}") }
             )),
         }
     })?;
-    let (text, select) = out;
+    let (text, select, new_documents, saved_to) = out;
     if let Some((l, f)) = select {
         d.layer = l as u32;
         d.frame = f as u32;
     }
+    if let Some(p) = saved_to {
+        d.path = Some(p);
+    }
     d.clamp_active();
-    Ok(text)
+    Ok((text, new_documents))
 }
 
 fn run_lua(e: &mut Engine, a: LuaArgs) -> R<Out> {
@@ -127,16 +144,45 @@ fn run_lua(e: &mut Engine, a: LuaArgs) -> R<Out> {
         Some(t) if (1..=MAX_TIMEOUT_SECONDS as u32).contains(&t) => Some(u64::from(t)),
         Some(t) => return Err(format!("timeout_seconds must be 1-{MAX_TIMEOUT_SECONDS}, got {t}")),
     };
+    let mut allowed = Vec::new();
+    for p in a.allow_paths.iter().flatten() {
+        let resolved = e.sandbox.dir(p).or_else(|_| e.sandbox.write(p))?;
+        // Scripts may name the path as given or resolved (on macOS /var is /private/var): allow both spellings.
+        let given = std::path::PathBuf::from(p);
+        if given.is_absolute() && given != resolved {
+            allowed.push(given);
+        }
+        allowed.push(resolved);
+    }
     let d = e.doc(&a.doc)?;
+    let cfg = scripting::RunConfig {
+        script_name: a.path.clone().unwrap_or_else(|| "run_lua".into()),
+        doc_path: d.path.clone(),
+        allowed_paths: allowed,
+    };
     let (u0, _) = d.doc.history_counts();
-    let output = run_with_limits(d, &src, limits(secs))?;
+    let (output, new_documents) = run_with_limits(d, &src, limits(secs), &cfg)?;
     let (u1, _) = d.doc.history_counts();
     let output: String = output.chars().take(50_000).collect();
-    Out::json(json!({
+    let mut v = json!({
         "doc": d.id, "ok": true, "changed_document": u1 != u0, "output": output,
         "active_layer": d.layer, "active_frame": d.frame,
         "layers": d.layer_count(), "frames": d.doc.frame_count(), "width": d.doc.width(), "height": d.doc.height(),
-    }))
+    });
+    // Documents the script made with Sprite(...) or app.open become headless documents of this server.
+    let mut created = Vec::new();
+    for nd in new_documents {
+        let name = nd
+            .path
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .map_or("Untitled".into(), |n| n.to_string_lossy().into_owned());
+        created.push(e.add(crate::doc::Doc::from_sprite(nd.sprite), name, nd.path, None));
+    }
+    if !created.is_empty() {
+        v["new_documents"] = json!(created);
+    }
+    Out::json(v)
 }
 
 /// The example scripts that ship with the core: (file name, source).
