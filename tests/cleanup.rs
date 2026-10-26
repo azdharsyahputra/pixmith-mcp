@@ -216,7 +216,8 @@ fn lint_reports_every_category_with_capped_positions_and_changes_nothing() {
     assert_eq!(cel["specks"]["items"][0], json!({ "x": 10, "y": 9, "size": 1 }));
     assert_eq!(cel["semi_transparent"]["items"], json!([{ "x": 4, "y": 3, "size": 1 }]), "{r}");
     assert_eq!(cel["off_palette"]["items"], json!([{ "x": 3, "y": 5, "size": 1 }]), "{r}");
-    assert!(cel["strays"]["items"].as_array().unwrap().iter().any(|s| s["x"] == 3 && s["y"] == 5), "{r}");
+    // Strays only count lone pixels in flat areas, so the odd pixel next to the outline is not one.
+    assert!(!cel["strays"]["items"].as_array().unwrap().iter().any(|s| s["x"] == 3 && s["y"] == 5), "{r}");
     assert!(cel["light_edge"]["count"].as_u64().unwrap() >= 20, "the paper band: {r}");
     assert!(r["total"].as_u64().unwrap() >= 25, "{r}");
     assert_eq!(r["totals_by_category"]["holes"], 1);

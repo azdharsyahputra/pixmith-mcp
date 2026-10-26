@@ -1,6 +1,6 @@
 [package]
 name = "pixmith-mcp"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2024"
 rust-version = "1.99"
 description = "Model Context Protocol server for the Pixmith pixel-art editor: lets AI agents create, edit, inspect and export sprites"
@@ -20,7 +20,7 @@ default = ["http"]
 http = ["dep:axum", "rmcp/transport-streamable-http-server"]
 
 [dependencies]
-pixmith-core = { git = "https://github.com/azdharsyahputra/pixmith", rev = "48802f18c53eb3bcc7ec682992e4510426d5a8bf", package = "pixmith-core" }
+pixmith-core = { git = "https://github.com/azdharsyahputra/pixmith", rev = "7750c1c2b473f47d120f8e485b32d7522d4b0975", package = "pixmith-core" }
 rmcp = { version = "3.7.0", default-features = false, features = ["server", "macros", "transport-io"] }
 tokio = { version = "1.54", features = ["rt-multi-thread", "macros", "io-std", "sync", "net", "signal"] }
 serde = { version = "1", features = ["derive"] }
