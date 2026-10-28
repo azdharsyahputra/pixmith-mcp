@@ -127,8 +127,8 @@ pub struct NewArgs {
     pub color_mode: Option<ColorMode>,
     /// Load a built-in palette by name (see palette action list_presets), e.g. "PICO-8".
     pub palette_preset: Option<String>,
-    /// Where to create it when the Pixmith app is connected: "app" (default; the sprite opens in a new tab of the app)
-    /// or "headless" (kept inside this server only).
+    /// "app" (default; the sprite opens in a new tab of the Pixmith app, which is started when it is not running, so
+    /// the user sees it) or "headless" (kept inside this server only: only when the user asks for that).
     pub target: Option<Target>,
 }
 
@@ -226,7 +226,8 @@ pub struct OpenArgs {
     pub cell_height: Option<u32>,
     /// sheet_json: the sheet image (default: meta.image from the JSON, next to it).
     pub png_path: Option<String>,
-    /// Where to open it when the Pixmith app is connected: "app" (default; a tab of the app) or "headless".
+    /// "app" (default; a tab of the Pixmith app, started when it is not running) or "headless" (kept inside this
+    /// server only: only when the user asks for that).
     pub target: Option<Target>,
     /// trace_grid: cell size in source pixels: "auto" (default), a number such as 6.5, or [x, y].
     pub pitch: Option<super::cleanup::PitchArg>,

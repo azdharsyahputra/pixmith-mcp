@@ -166,7 +166,7 @@ clients impose (Cursor, VS Code, Windsurf) while every schema stays flat and exp
 | Documents | `doc_new`, `doc_open`, `doc_save`, `doc_close`, `doc_list`, `doc_info`, `doc_set_active` | New sprites (size, background, color mode, palette preset); open `.pxmt` / `.aseprite` / `.ase`; import PNG, animated GIF, grid sprite sheets and sheets with Aseprite JSON; save / save as / save a copy; full inspection (layer tree, frames and durations, cel occupancy, tags, palette, slices, tilesets, user data, selection, history); `doc_close` closes one document or, with `all_headless: true`, every headless one |
 | App (live mode) | `app_status`, `app_connect`, `app_disconnect`, `game_screenshot` | Is the Pixmith app connected, which documents it has open; switch between the app and headless editing at runtime; screenshot of the running Godot game (Live Link game view, needs Pixmith 0.5.1+) |
 | Viewing | `render`, `frame_diff`, `get_pixels`, `get_pixel` | PNG image results (auto scale, frames, single layer or group, region, background, onion skin, View > Frame Difference with `diff_prev`); `frame_diff` counts the pixels a frame changed, appeared or disappeared against the previous frame (stuck / torn walk parts), per frame or for the whole animation; exact colors as a compact character grid with legend or as hex |
-| Drawing | `draw_pixels`, `draw_shape`, `draw_polygon`, `draw_curve`, `draw_stroke`, `fill`, `spray`, `retouch`, `gradient`, `draw_text`, `brush` | Batch pixels, Blur and Jumble brushes (`retouch`), line / rectangle / ellipse (filled or outline), polygons, Bezier curves, freehand strokes with pixel-perfect mode, flood fill (contiguous or global, tolerance, dither patterns), spray, linear / radial gradients with Bayer dither, the built-in pixel font; brush size and shape, ink modes (simple, alpha, lock alpha, behind, shading with a ramp), mirror symmetry, custom brushes |
+| Drawing | `draw_pixels`, `draw_shape`, `draw_polygon`, `draw_curve`, `draw_stroke`, `fill`, `spray`, `retouch`, `gradient`, `draw_text`, `brush` | Batch pixels, Blur and Jumble brushes (`retouch`), line / rectangle / ellipse (filled or outline), polygons, Bezier curves, freehand strokes with pixel-perfect mode, flood fill (contiguous or global, tolerance, dither patterns), spray, linear / radial gradients with Bayer dither, the built-in pixel font; brush size and shape, ink modes (simple, alpha, lock alpha, behind, shading with a ramp), mirror symmetry with a movable axis, custom brushes |
 | Selection | `select`, `iso_grid`, `clipboard` | Rectangle, polygon / lasso, magic wand, select by color, isometric tile (`iso_tile`, on the grid of the isometric tilemap layer or the one kept per document with `iso_grid`), all / none / invert, expand / contract / border, replace / add / subtract; delete, move and crop; copy / cut / paste (also a PNG file) as a floating selection, move, commit or cancel |
 | Transform | `transform`, `free_transform`, `warp`, `sprite_size` | Edit > Warp: a blur-free puppet / mesh warp of a cel (handle grid, pins, selection-aware, preview); flips, 90 / 180-degree turns, free rotation with RotSprite (per cel, all frames, all layers); a free-transform session (position, size, angle, skew, anchor); scale sprite; canvas size with anchor or offset |
 | Layers & frames | `layer`, `frame`, `cel`, `tag` | Add / group / duplicate / remove / reorder / into and out of groups / merge down / properties (name, visibility, opacity, 19 blend modes) / PNG as a new layer or, with `replace: true`, as the new pixels of an existing layer in one undo step; `import_sheet` cuts a sprite sheet into consecutive frames of a layer; frames add / duplicate / remove / move / durations; cels link / unlink / opacity / copy / paste / move / clear; tags with direction, repeat and color |
@@ -193,7 +193,8 @@ The server also provides:
 ### Conventions
 
 - Documents are addressed by the id `doc_new` / `doc_open` return (`"d1"`, or `"app:doc-3"` for a document open in the
-  Pixmith app); `doc` can be left out when only one document is open (with the app connected: the app's active one).
+  Pixmith app); `doc` can be left out when only one document is open (with the app connected: only while the app has one document
+  open).
 - Pixel coordinates are 0-based from the top-left. Layers are 0-based with layer 0 at the bottom; layers, tags,
   slices and tilesets can also be given by name. Frames are 0-based. (Lua scripts use 1-based layers and frames, as
   documented in the Lua API.)
@@ -226,7 +227,9 @@ The server also provides:
 Start Pixmith 0.5.0 or later (macOS app, or the Windows / Linux / macOS desktop app) and use the tools as usual: the agent's
 edits show up in the open window while it works, each call is one undo step named **AI: \<tool\>** (for example
 `AI: draw_shape rectangle`) that you can take back with Cmd/Ctrl+Z, and the document is marked as edited. Without an app
-(never started, or after `app_disconnect`) the very same tools work headless on files, as before; an app that
+running, `doc_new` / `doc_open` start it (in the background, once per session; `PIXMITH_LAUNCH=0` turns that off)
+and wait up to 20 seconds for it. When it cannot be used (not installed, or after `app_disconnect`) the very same tools
+work headless on files, as before; an app that
 disappears in the middle of a session is reported as an error instead of being silently replaced by headless editing
 (see "No silent fallback" below). No configuration is needed.
 
@@ -242,7 +245,9 @@ overwriting something you changed in the meantime: it fetches again and redoes t
 times); while a dialog is open the app asks it to wait and it retries for a few seconds.
 
 - **Which document?** Documents open in the app have the ids `app:<id>` (`app_status` or `doc_list` shows them).
-  Leave `doc` out and the tools use the app's **active** document, so you choose the target by switching tabs.
+  Pass `doc` on every call: with several documents open in the app a call without it fails (the error names the tab
+  you are looking at) instead of editing whatever tab happens to be in front. With a single document `doc` may be left
+  out.
   `doc_new` and `doc_open` create the sprite in a new tab of the app; pass `"target": "headless"` to keep a document
   inside the server only (its id is `d1`, ...). `doc_save`, `doc_close` and `doc_set_active` act on the app's tab
   (`doc_save` saves with the app, so its dirty marker is cleared; `copy: true` writes a copy without touching the tab).
@@ -267,8 +272,12 @@ times); while a dialog is open the app asks it to wait and it retries for a few 
 - **Several clients, several apps.** The newest running instance wins. Discovery files of dead processes are ignored
   (and deleted); a file whose port refuses the connection is ignored. `PIXMITH_SUPPORT_DIR` replaces the platform's
   app data folder here exactly as it does in the apps (the folder is `Pixmith` inside it, `pixmith` on Linux).
-- **Limits.** `history` and `history_goto` are not available on app documents and `transaction` does nothing there: the
-  app owns the undo history and every call is its own step. `undo` / `redo` are handed to the app when it supports
+- **Transactions.** `transaction` begin / end works on app documents: the calls inside it edit the server's copy
+  (`render` and `get_pixels` see them) and the outermost `end` sends the result as one undo step **AI: \<label\>**.
+  If you change the document in the app meanwhile, the transaction is cancelled and nothing is applied; `doc_save`,
+  `undo` and `redo` wait for `end`.
+- **Limits.** `history` and `history_goto` are not available on app documents: the app owns the undo history and every
+  call (or transaction) is its own step. `undo` / `redo` are handed to the app when it supports
   `documents.undo` / `documents.redo`; otherwise the tool says to press Cmd/Ctrl+Z in the app. The app's own
   selection is not visible to the tools; a selection made with the `select` tool is kept by the server for the next
   calls and dropped as soon as the document changes in the app. Each call is a round trip and an undo step, so prefer

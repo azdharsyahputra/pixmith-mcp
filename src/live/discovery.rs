@@ -116,6 +116,34 @@ pub fn scan(dir: &Path, alive: &dyn Fn(u32) -> bool, cleanup: bool) -> Vec<Entry
     found.into_iter().map(|(e, _)| e).collect()
 }
 
+/// Starts the installed Pixmith app without waiting for it: on macOS by its bundle id (in the background, so it does
+/// not take the focus), on Windows from the installer's folders, on Linux as `pixmith-desktop` from the PATH.
+pub fn start_app() -> std::io::Result<()> {
+    use std::process::Command;
+    let missing = || std::io::Error::new(std::io::ErrorKind::NotFound, "the Pixmith app is not installed");
+    match current_os() {
+        Os::Mac => {
+            let ok = Command::new("open").args(["-g", "-b", "io.github.azdharsyahputra.pixmith"]).status()?.success();
+            if ok { Ok(()) } else { Err(missing()) }
+        }
+        Os::Windows => {
+            let exe = ["LOCALAPPDATA", "ProgramFiles"]
+                .iter()
+                .filter_map(|k| std::env::var(k).ok())
+                .map(|base| {
+                    let base = PathBuf::from(base);
+                    if base.ends_with("Local") { base.join("Programs") } else { base }
+                        .join("Pixmith")
+                        .join("Pixmith.exe")
+                })
+                .find(|p| p.is_file())
+                .ok_or_else(missing)?;
+            Command::new(exe).spawn().map(|_| ())
+        }
+        Os::Linux => Command::new("pixmith-desktop").spawn().map(|_| ()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

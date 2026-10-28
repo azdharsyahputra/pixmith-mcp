@@ -178,8 +178,16 @@ pub struct Paint {
     pub shading_ramp: Option<Vec<Color>>,
     /// Shading steps toward the start of the ramp instead of the end.
     pub shading_reverse: Option<bool>,
-    /// Symmetry: also draw mirrored across the canvas center (horizontal = left/right, vertical = top/bottom).
+    /// Symmetry: also draw mirrored (horizontal = left/right, vertical = top/bottom) across the canvas center, or
+    /// across `mirror_axis_x` / `mirror_axis_y`.
     pub mirror: Option<Mirror>,
+    /// Where the left/right mirror line is, in pixels from the left edge (default: the canvas center). 16 is the line
+    /// between columns 15 and 16 (column 15 mirrors to 16); 16.5 runs through column 16 (it stays put and 15 mirrors
+    /// to 17). Steps of 0.5.
+    pub mirror_axis_x: Option<f64>,
+    /// Where the top/bottom mirror line is, in pixels from the top edge (default: the canvas center); like
+    /// `mirror_axis_x`.
+    pub mirror_axis_y: Option<f64>,
 }
 
 impl Paint {
@@ -191,7 +199,13 @@ impl Paint {
         self.mirror.unwrap_or_default().flags()
     }
 
-    /// Sets the core's (thread-wide) ink and brush shape for this call.
+    /// The color to paint with `c` under this call's ink: the shading ink only steps existing pixels along its ramp,
+    /// so a transparent color (which would make the brush erase) is replaced by an opaque one there.
+    pub fn ink_color(&self, c: u32) -> u32 {
+        if self.ink.unwrap_or_default() == InkMode::Shading && c & 0xFF == 0 { c | 0xFF } else { c }
+    }
+
+    /// Sets the core's (thread-wide) ink, brush shape and mirror axes for this call.
     pub fn apply(&self, d: &DocEntry) {
         let mode = self.ink.unwrap_or_default();
         let mut ramp: Vec<u32> = self.shading_ramp.iter().flatten().map(|c| c.0).collect();
@@ -201,6 +215,24 @@ impl Paint {
         let p = if ramp.is_empty() { std::ptr::null() } else { ramp.as_ptr() };
         unsafe { ink::pixmith_ink_set(mode as u32, self.shading_reverse.unwrap_or(false), p, ramp.len()) };
         ink::pixmith_brush_circle(self.brush_shape.unwrap_or_default() == BrushShape::Circle);
+        let doubled = |a: Option<f64>| a.map_or(-1, |v| (v * 2.0).round().max(0.0) as i32);
+        shapes::pixmith_set_mirror_axes(doubled(self.mirror_axis_x), doubled(self.mirror_axis_y));
+    }
+
+    /// Checks the mirror axes against the canvas (`dims`): each must lie on it, in steps of 0.5.
+    pub fn check_axes(&self, dims: (u32, u32)) -> R<()> {
+        for (name, v, size) in
+            [("mirror_axis_x", self.mirror_axis_x, dims.0), ("mirror_axis_y", self.mirror_axis_y, dims.1)]
+        {
+            let Some(v) = v else { continue };
+            if !v.is_finite() || v < 0.5 || v > size as f64 - 0.5 {
+                return Err(format!("{name} {v} is off the canvas: use 0.5 to {}", size as f64 - 0.5));
+            }
+            if (v * 2.0).fract() != 0.0 {
+                return Err(format!("{name} {v} must be a whole or half pixel (e.g. 16 or 16.5)"));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -233,6 +265,8 @@ pub fn paint_op(e: &mut Engine, p: &Paint, label: &str, f: impl FnOnce(&DocEntry
     let d = e.doc(&p.doc)?;
     let layer = d.image_layer(&p.layer)?;
     let frame = d.frame(p.frame)?;
+    let sprite = d.doc.sprite();
+    p.check_axes((sprite.width, sprite.height))?;
     let before = cel(d, layer, frame);
     let (undo0, _) = d.doc.history_counts();
     d.edit(label, Undo::Step, |d| {
@@ -282,6 +316,14 @@ fn draw_pixels(e: &mut Engine, a: PixelsArgs) -> R<Out> {
     if list.len() > 65536 {
         return Err("at most 65536 pixels per call".into());
     }
+    // A position listed twice is painted once, with its last color (the shading ink would otherwise step it twice).
+    let mut seen = std::collections::HashSet::new();
+    list.reverse();
+    list.retain(|&(x, y, _)| seen.insert((x, y)));
+    list.reverse();
+    for px in &mut list {
+        px.2 = a.paint.ink_color(px.2);
+    }
     let (size, flags) = (a.paint.size(), a.paint.flags());
     paint_op(e, &a.paint, "Pencil", |d, l, f| {
         for &(x, y, c) in &list {
@@ -327,7 +369,7 @@ fn draw_shape(e: &mut Engine, a: ShapeArgs) -> R<Out> {
             a.from[1],
             a.to[0],
             a.to[1],
-            a.color.0,
+            a.paint.ink_color(a.color.0),
             size,
             flags,
             false,
@@ -357,7 +399,17 @@ fn draw_polygon(e: &mut Engine, a: PolygonArgs) -> R<Out> {
     let flat: Vec<i32> = a.points.iter().flat_map(|p| [p[0], p[1]]).collect();
     let size = a.paint.size();
     paint_op(e, &a.paint, "Polygon", |d, l, f| unsafe {
-        curves::pixmith_polygon(d.doc.raw(), l, f, flat.as_ptr(), a.points.len(), a.color.0, size, flags, false)
+        curves::pixmith_polygon(
+            d.doc.raw(),
+            l,
+            f,
+            flat.as_ptr(),
+            a.points.len(),
+            a.paint.ink_color(a.color.0),
+            size,
+            flags,
+            false,
+        )
     })
 }
 
@@ -377,7 +429,7 @@ fn draw_curve(e: &mut Engine, a: CurveArgs) -> R<Out> {
     let flat: Vec<i32> = a.points.iter().flat_map(|p| [p[0], p[1]]).collect();
     let (size, flags) = (a.paint.size(), a.paint.flags());
     paint_op(e, &a.paint, "Curve", |d, l, f| unsafe {
-        curves::pixmith_curve(d.doc.raw(), l, f, flat.as_ptr(), a.color.0, size, flags, false)
+        curves::pixmith_curve(d.doc.raw(), l, f, flat.as_ptr(), a.paint.ink_color(a.color.0), size, flags, false)
     })
 }
 
@@ -401,7 +453,7 @@ fn draw_stroke(e: &mut Engine, a: StrokeArgs) -> R<Out> {
     paint_op(e, &a.paint, "Pencil", |d, l, f| {
         let raw = d.doc.raw();
         let p0 = a.points[0];
-        unsafe { shapes::pixmith_stroke_begin(raw, l, f, p0[0], p0[1], a.color.0, size, flags) };
+        unsafe { shapes::pixmith_stroke_begin(raw, l, f, p0[0], p0[1], a.paint.ink_color(a.color.0), size, flags) };
         for p in &a.points[1..] {
             unsafe { shapes::pixmith_stroke_to(raw, p[0], p[1]) };
         }
@@ -491,7 +543,18 @@ fn fill(e: &mut Engine, a: FillArgs) -> R<Out> {
     if tolerance == 0 {
         let other = a.color2.map_or(0, |c| c.0);
         return paint_op(e, &a.paint, "Fill", |d, l, f| unsafe {
-            ink::pixmith_fill_pattern(d.doc.raw(), l, f, a.x, a.y, a.color.0, other, pattern as u32, contiguous, flags)
+            ink::pixmith_fill_pattern(
+                d.doc.raw(),
+                l,
+                f,
+                a.x,
+                a.y,
+                a.paint.ink_color(a.color.0),
+                other,
+                pattern as u32,
+                contiguous,
+                flags,
+            )
         });
     }
     if pattern != Pattern::Solid {
@@ -540,10 +603,24 @@ fn fill(e: &mut Engine, a: FillArgs) -> R<Out> {
     p.doc = a.paint.doc.clone();
     p.ink = a.paint.ink;
     p.mirror = a.paint.mirror;
+    p.mirror_axis_x = a.paint.mirror_axis_x;
+    p.mirror_axis_y = a.paint.mirror_axis_y;
     p.shading_ramp = a.paint.shading_ramp.clone();
     p.shading_reverse = a.paint.shading_reverse;
     paint_op(e, &p, "Fill", |d, l, f| unsafe {
-        font::pixmith_stamp_mask(d.doc.raw(), l, f, 0, 0, w as u32, h as u32, mask.as_ptr(), a.color.0, flags, false)
+        font::pixmith_stamp_mask(
+            d.doc.raw(),
+            l,
+            f,
+            0,
+            0,
+            w as u32,
+            h as u32,
+            mask.as_ptr(),
+            p.ink_color(a.color.0),
+            flags,
+            false,
+        )
     })
 }
 
@@ -578,7 +655,7 @@ fn spray(e: &mut Engine, a: SprayArgs) -> R<Out> {
                     f,
                     p[0],
                     p[1],
-                    a.color.0,
+                    a.paint.ink_color(a.color.0),
                     radius,
                     density,
                     seed.wrapping_add(i as u32),
@@ -663,7 +740,7 @@ fn draw_text(e: &mut Engine, a: TextArgs) -> R<Out> {
     let color = a.color.ok_or("draw_text needs `color` (or measure_only=true)")?;
     let flags = a.paint.flags();
     let mut out = paint_op(e, &a.paint, "Text", |d, l, f| unsafe {
-        font::pixmith_text(d.doc.raw(), l, f, a.x, a.y, c.as_ptr(), scale, color.0, flags, false)
+        font::pixmith_text(d.doc.raw(), l, f, a.x, a.y, c.as_ptr(), scale, a.paint.ink_color(color.0), flags, false)
     })?;
     if let Some(o) = out.value.as_object_mut() {
         o.insert("width".into(), json!(size[0]));

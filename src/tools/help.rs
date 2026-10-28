@@ -31,13 +31,17 @@ engine in-process; every tool call edits real documents with the same code the d
 - While a selection exists, drawing, fills, gradients and filters only touch selected pixels. select none clears it.
 
 ## Live mode (the Pixmith app)
-- When the Pixmith app is open on this computer, the tools edit ITS documents: the user watches every edit appear in
-  the window, and each call is one undo step named "AI: <tool>" that they can take back with Cmd/Ctrl+Z. Without
-  the app everything works headless, in documents kept inside this server (ids "d1", "d2", ...).
+- Work in the Pixmith app: that is the default. The tools edit the app's documents, the user watches every edit
+  appear in the window, and each call is one undo step named "AI: <tool>" that they can take back with Cmd/Ctrl+Z.
+  When the app is not running, doc_new / doc_open start it (in the background) and wait for it. Headless documents
+  kept inside this server (ids "d1", "d2", ...) are for when the user asks for them or the app cannot be used; do
+  not choose headless on your own just to try things out.
 - app_status tells which one you have: connected or not, the app's documents (ids "app:<id>", e.g. "app:doc-3") and
   the active one. app_connect / app_disconnect switch at runtime (use app_connect after the user starts the app).
-- In live mode `doc` may be omitted to mean the app's ACTIVE document, so the user chooses the target by switching
-  tabs. doc_new / doc_open create the sprite in the app (target "headless" keeps it inside the server instead);
+- Pass `doc` on every call (the id doc_new / doc_open returned, or one from doc_list). It may be left out only while
+  the app has a single document open; with several, a call without `doc` fails instead of editing whatever tab the
+  user is looking at (the error names that tab). doc_new / doc_open create the sprite in the app (target
+  "headless" keeps it inside the server instead);
   doc_save / doc_close / doc_set_active act on the app's tab. doc_list shows both kinds.
 - Once the app has been connected in this session, a call that creates or edits a document never silently turns
   headless: if the app is gone it reconnects once and otherwise returns an error. Start the app again, pass
@@ -45,8 +49,11 @@ engine in-process; every tool call edits real documents with the same code the d
 - Tools default to the app's current layer and frame; aiming a tool at another layer or frame moves the app's
   current one there, so the user sees where you are working. The user may edit at the same time: a call that lost
   that race is repeated on the new version automatically, and a busy app (open dialog) is retried for a few seconds.
-- Not available on app documents: history, history_goto (the app owns the undo history; transaction does nothing,
-  every call is its own step). undo / redo work when the app supports them and otherwise tell the user to press
+- transaction begin/end works on app documents: the calls inside it edit this server's copy, and end sends the result
+  to the app as ONE undo step "AI: <label>" (draw a whole character as one step). The app shows the edits at end;
+  render / get_pixels already see them. If the user changes the document meanwhile, the transaction is cancelled
+  and nothing is applied. doc_save, undo and redo wait for end.
+- Not available on app documents: history, history_goto (the app owns the undo history). undo / redo work when the app supports them and otherwise tell the user to press
   Cmd/Ctrl+Z. The app's own selection is not visible to tools; a selection made with the select tool lives in this
   server until someone else changes the document.
 - Prefer a few meaningful calls over thousands of tiny ones: every call is a full round trip to the window and an
@@ -124,7 +131,8 @@ const LAYERS: &str = r##"# Layers, frames, cels and tags (layer, frame, cel, tag
 const DRAWING: &str = r##"# Drawing (draw_pixels, draw_shape, draw_polygon, draw_curve, draw_stroke, fill, spray, retouch, gradient, draw_text, brush)
 - They take optional doc, layer and frame, a color ("#RRGGBB[AA]", names, "transparent" erases) and, where it makes
   sense, brush_size / brush_shape, ink (simple, alpha, lock_alpha, behind, shading) and mirror (horizontal / vertical /
-  both); see each tool's schema.
+  both, across the canvas center or mirror_axis_x / mirror_axis_y); see each tool's schema. The shading ink ignores
+  the color (it steps the pixels along shading_ramp), so any color works with it, "transparent" included.
 - Use draw_pixels for exact batches ({pixels: [{x, y, color}]} or points + one color), draw_shape for lines, rectangles
   and ellipses (filled or outline), draw_polygon / draw_curve / draw_stroke for paths (pixel_perfect for clean lines).
 - fill is the Paint Bucket (contiguous or global, tolerance, dither pattern); gradient and spray respect the selection.
@@ -228,12 +236,13 @@ const HISTORY: &str = r##"# History (undo, redo, history, history_goto, transact
 - Every mutating call is one labeled undo step; failed calls change nothing.
 - undo / redo {steps}; history lists the steps; history_goto {position} jumps (0 = as opened).
 - transaction {action: begin, label} ... transaction {action: end} makes many calls one undo step (nestable).
-- With the Pixmith app connected the app owns the history: edits are steps named "AI: <tool>"; history, history_goto and
-  transaction are not available there.
+- With the Pixmith app connected the app owns the history: edits are steps named "AI: <tool>" (a transaction is one
+  step "AI: <label>"); history and history_goto are not available there.
 "##;
 
 const LIVE: &str = r##"# Live mode (app_status, app_connect, app_disconnect, game_screenshot)
-- With the Pixmith app running, the tools edit ITS documents (ids "app:<id>"); `doc` omitted = the app's active one.
+- Live is the default: the tools edit the Pixmith app's documents (ids "app:<id>"), and doc_new / doc_open start the
+  app when it is not running. Pass `doc` on every call; it may be left out only while the app has one document open.
   app_status shows the connection and the headless documents; app_connect / app_disconnect switch at runtime.
 - doc_new / doc_open create the sprite in the app; target "headless" keeps it inside this server (ids d1, d2, ...).
 - Once connected in a session, a call that creates or edits a document never silently turns headless: if the app is
@@ -277,7 +286,8 @@ Each line: what the app calls it -> the MCP call (example). Coordinates are canv
 ## Tool options
 - Ink modes Simple / Alpha Compositing / Lock Alpha / Behind / Shading -> ink: "simple" | "alpha" | "lock_alpha" | "behind" | "shading" (+ shading_ramp) on any draw_* call, fill, spray and gradient
 - Pixel-perfect Pencil -> pixel_perfect: true on draw_stroke
-- Symmetry (Mirror Horizontally / Vertically) -> mirror: "horizontal" | "vertical" | "both"
+- Symmetry (Mirror Horizontally / Vertically) -> mirror: "horizontal" | "vertical" | "both"; the axis fields ->
+  mirror_axis_x / mirror_axis_y (pixels, 0.5 steps; default the canvas center)
 - Brush size / Round Brush -> brush_size: 1-64, brush_shape: "circle" (retouch takes `size`)
 - Custom brush (Brush from Selection, Reset Brush) -> select pixels, then brush {action: "capture"}; brush {action: "reset"}
 - Filled Shapes -> filled: true; Contiguous Fill -> contiguous on fill

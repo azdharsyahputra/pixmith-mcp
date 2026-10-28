@@ -380,3 +380,47 @@ fn run_lua_documents_made_by_the_script_become_headless_documents() {
     let info = c.ok("doc_info", json!({ "doc": id, "sections": [] }));
     assert_eq!((info["width"].as_u64(), info["height"].as_u64()), (Some(16), Some(12)), "{info}");
 }
+
+#[test]
+fn the_shading_ink_never_erases_and_steps_a_repeated_pixel_once() {
+    let mut c = Client::start(&[]);
+    c.ok("doc_new", json!({ "width": 8, "height": 8 }));
+    c.ok("fill", json!({ "x": 0, "y": 0, "color": "#202020" }));
+    let ramp = json!(["#202020", "#606060", "#a0a0a0", "#e0e0e0"]);
+    // A transparent color would make the brush erase; with the shading ink the color does not matter.
+    c.ok("draw_pixels", json!({ "points": [[1, 1]], "color": "transparent", "ink": "shading", "shading_ramp": ramp }));
+    assert_eq!(c.pixel(1, 1), "#606060ff");
+    // The same position twice in one call is one step, not two.
+    c.ok("draw_pixels", json!({ "points": [[2, 2], [2, 2]], "color": "#000", "ink": "shading", "shading_ramp": ramp }));
+    assert_eq!(c.pixel(2, 2), "#606060ff");
+    // A plain repeated pixel keeps the last color given.
+    c.ok(
+        "draw_pixels",
+        json!({ "pixels": [{ "x": 3, "y": 3, "color": "#f00" }, { "x": 3, "y": 3, "color": "#00f" }] }),
+    );
+    assert_eq!(c.pixel(3, 3), "#0000ffff");
+}
+
+#[test]
+fn the_mirror_axis_can_be_moved() {
+    let mut c = Client::start(&[]);
+    c.ok("doc_new", json!({ "width": 16, "height": 8 }));
+    // Between columns 4 and 5: column 2 mirrors to 7.
+    c.ok("draw_pixels", json!({ "points": [[2, 1]], "color": "#f00", "mirror": "horizontal", "mirror_axis_x": 5 }));
+    assert_eq!(c.pixel(7, 1), "#ff0000ff");
+    assert_eq!(c.pixel(13, 1), "#00000000");
+    // Through column 5: 5 stays, 3 mirrors to 7.
+    c.ok(
+        "draw_pixels",
+        json!({ "points": [[3, 2], [5, 2]], "color": "#0f0", "mirror": "horizontal", "mirror_axis_x": 5.5 }),
+    );
+    assert_eq!(c.pixel(7, 2), "#00ff00ff");
+    // Without an axis it is the canvas center again (the setting does not stick).
+    c.ok("draw_pixels", json!({ "points": [[0, 3]], "color": "#00f", "mirror": "horizontal" }));
+    assert_eq!(c.pixel(15, 3), "#0000ffff");
+    for bad in [json!(0), json!(16), json!(4.25)] {
+        let e = c
+            .err("draw_pixels", json!({ "points": [[0, 0]], "color": "#f00", "mirror": "both", "mirror_axis_x": bad }));
+        assert!(e.contains("mirror_axis_x"), "{e}");
+    }
+}

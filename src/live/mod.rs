@@ -95,6 +95,11 @@ pub struct Live {
     /// What broke the connection the last time it was lost (e.g. "Broken pipe").
     lost_cause: Option<String>,
     shadows: HashMap<String, Shadow>,
+    /// Open transactions by app document id (labels, outermost first): their edits stay in the shadow and reach the
+    /// app as one undo step when the outermost one ends.
+    batches: HashMap<String, Vec<String>>,
+    /// This session already tried to start the app (it is started at most once).
+    launched: bool,
     /// Files the app's imported documents (PNG, GIF, sheet) came from, by app document id.
     sources: HashMap<String, std::path::PathBuf>,
 }
@@ -109,6 +114,8 @@ impl Live {
             was_connected: false,
             lost_cause: None,
             shadows: HashMap::new(),
+            batches: HashMap::new(),
+            launched: false,
             sources: HashMap::new(),
         }
     }
@@ -183,6 +190,51 @@ impl Live {
     pub fn disconnect(&mut self) {
         self.conn = None;
         self.shadows.clear();
+        self.batches.clear();
+    }
+
+    /// Starts the installed Pixmith app when none is running (once per session, not with --live off or after
+    /// app_disconnect) and connects to it, waiting up to 20 seconds for it to come up. Live editing is the default
+    /// way of working: the user watches the edits and can undo them. Skipped when `PIXMITH_LAUNCH=0`, or when
+    /// `PIXMITH_SUPPORT_DIR` points the server at another app data folder (tests, custom setups).
+    pub fn launch(&mut self) -> Result<(), String> {
+        if self.conn.is_some() {
+            return Ok(());
+        }
+        if self.mode == Mode::Off || self.disabled {
+            return Err(self.not_connected());
+        }
+        let env = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
+        if self.launched || env("PIXMITH_LAUNCH").is_some_and(|v| v == "0") || env("PIXMITH_SUPPORT_DIR").is_some() {
+            return Err(self.not_connected());
+        }
+        self.launched = true;
+        let started = match env("PIXMITH_APP") {
+            Some(cmd) => std::process::Command::new(cmd).spawn().map(|_| ()),
+            None => discovery::start_app(),
+        };
+        if let Err(x) = started {
+            self.problem = Some(format!("no Pixmith app is running and it could not be started ({x})"));
+            return Err(self.not_connected());
+        }
+        let until = std::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            if self.connect(None).is_ok() {
+                return Ok(());
+            }
+            if std::time::Instant::now() >= until {
+                self.problem = Some(
+                    "the Pixmith app was started but did not accept a connection within 20 seconds; check that \"Allow AI agents to control Pixmith (Live mode)\" is on in its Preferences, then call app_connect".into(),
+                );
+                return Err(self.not_connected());
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
+    }
+
+    /// The outermost open transaction on app document `id`.
+    fn batching(&self, id: &str) -> Option<&String> {
+        self.batches.get(id).and_then(|b| b.first())
     }
 
     /// Closes a tab this server created in the app and could not finish building (best effort, reconnecting once).
@@ -413,7 +465,7 @@ impl Live {
                     Err(e) => v["documents_error"] = json!(e.to_string()),
                 }
                 v["note"] = json!(
-                    "Tools edit the app's documents (ids app:<id>; `doc` may be omitted for the active one). Each call is an undo step named \"AI: <tool>\" in the app."
+                    "Tools edit the app's documents (ids app:<id>; pass `doc` on every call; it may be left out only while the app has one document open). Each call is an undo step named \"AI: <tool>\" in the app; a transaction makes many calls one step."
                 );
             }
             None => {
@@ -596,12 +648,10 @@ fn route(e: &mut Engine, args: &Value) -> R<Option<AppDoc>> {
         Err(x) if e.live.was_connected() => return Err(e.live.lost().unwrap_or_else(|| explain(&x, "the app"))),
         Err(_) => return Ok(None),
     };
-    let pick = active.as_ref().and_then(|a| docs.iter().find(|d| &d.id == a)).or(match docs.as_slice() {
-        [only] => Some(only),
-        _ => None,
-    });
-    if let Some(d) = pick {
-        return Ok(Some(d.clone()));
+    // Without `doc` a call goes to the app's only document. With several open it would land in whatever tab the user
+    // happens to look at, so it must name one.
+    if let [only] = docs.as_slice() {
+        return Ok(Some(only.clone()));
     }
     if docs.is_empty() {
         if !e.docs.is_empty() {
@@ -611,7 +661,18 @@ fn route(e: &mut Engine, args: &Value) -> R<Option<AppDoc>> {
             "no document is open in the Pixmith app; call doc_new or doc_open (they create it in the app)".into()
         );
     }
-    Err(format!("several documents are open in the Pixmith app and none is active; pass `doc` ({})", ids(&docs)))
+    let looking = active
+        .as_ref()
+        .and_then(|a| docs.iter().find(|d| &d.id == a))
+        .map(|d| {
+            format!(". The user is looking at {} ({}); use it only when the user means that tab", d.tool_id(), d.name)
+        })
+        .unwrap_or_default();
+    Err(format!(
+        "{} documents are open in the Pixmith app, so pass `doc` (the id from doc_new / doc_open / doc_list) so the edit cannot land in the wrong tab: {}{looking}",
+        docs.len(),
+        ids(&docs)
+    ))
 }
 
 fn ids(docs: &[AppDoc]) -> String {
@@ -662,6 +723,9 @@ fn create_document(e: &mut Engine, call: &Call, mut args: Value) -> R<Out> {
         Some(other) => return Err(format!("target must be \"app\" or \"headless\", not {other:?}")),
     };
     let mut connected = target != Some(Target::Headless) && e.live.ensure();
+    if !connected && target != Some(Target::Headless) && !e.live.was_connected() {
+        connected = e.live.launch().is_ok();
+    }
     if connected && let Err(x) = e.live.list() {
         // A connection that broke since the last call: `list` already reconnected once.
         connected = false;
@@ -813,20 +877,96 @@ fn on_app(e: &mut Engine, call: &Call, mut args: Value, doc: AppDoc) -> R<Out> {
     if let Some(o) = args.as_object_mut() {
         o.insert("doc".into(), json!(doc.tool_id()));
     }
+    if let Some(label) = e.live.batching(&doc.id).cloned()
+        && matches!(name, "doc_save" | "undo" | "redo")
+    {
+        return Err(format!(
+            "transaction {label:?} is open on {}: its edits reach the app only when it ends; call transaction end first",
+            doc.tool_id()
+        ));
+    }
     match name {
         "doc_save" => save_in_app(e, args, doc),
-        "doc_close" => close_in_app(e, args, doc),
+        "doc_close" => {
+            e.live.batches.remove(&doc.id);
+            close_in_app(e, args, doc)
+        }
         "undo" | "redo" => step_in_app(e, args, doc, name),
         "history" | "history_goto" => Err(format!(
-            "{name} is not available in live mode: the Pixmith app keeps the undo history of {}. Every edit made through this server is a step named \"AI: <tool>\" there; use Cmd/Ctrl+Z (Edit menu) in the app",
+            "{name} is not available in live mode: the Pixmith app keeps the undo history of {}. Every edit made through this server is a step named \"AI: <tool>\" there (\"AI: <label>\" for a transaction); use undo, or Cmd/Ctrl+Z (Edit menu) in the app",
             doc.tool_id()
         )),
-        "transaction" => Out::json(json!({
-            "doc": doc.tool_id(),
-            "open_transactions": [],
-            "note": "transactions are not used in live mode: every tool call is its own undo step named \"AI: <tool>\" in the app",
-        })),
+        "transaction" => transaction_in_app(e, args, doc),
         _ => run_on_shadow(e, call, args, doc),
+    }
+}
+
+/// A transaction on an app document: the calls inside it edit this server's copy only, and the outermost `end`
+/// sends the result to the app as ONE undo step "AI: <label>". If the document changes in the app in the meantime
+/// (the user drew on it), the transaction is cancelled and nothing is applied.
+fn transaction_in_app(e: &mut Engine, args: Value, doc: AppDoc) -> R<Out> {
+    use crate::tools::history::{TxnAction, TxnArgs};
+    let a: TxnArgs = parse(args)?;
+    let tool_id = doc.tool_id();
+    match a.action {
+        TxnAction::Begin => {
+            let depth = e.live.batches.get(&doc.id).map_or(0, Vec::len);
+            if depth >= 16 {
+                return Err("too many nested transactions".into());
+            }
+            if depth == 0 {
+                let sh = e.live.checkout(&doc, false)?;
+                e.live.shadows.insert(doc.id.clone(), sh);
+            }
+            let label = a.label.unwrap_or_else(|| "Edit".into());
+            e.live.batches.entry(doc.id.clone()).or_default().push(label);
+        }
+        TxnAction::End => {
+            let stack = e.live.batches.get_mut(&doc.id).filter(|b| !b.is_empty()).ok_or("no transaction is open")?;
+            let label = stack.pop().unwrap_or_default();
+            if stack.is_empty() {
+                e.live.batches.remove(&doc.id);
+                return commit_batch(e, &doc, &label);
+            }
+        }
+    }
+    Out::json(json!({ "doc": tool_id, "open_transactions": e.live.batches.get(&doc.id).cloned().unwrap_or_default() }))
+}
+
+/// Sends what a finished transaction changed to the app as one undo step.
+fn commit_batch(e: &mut Engine, doc: &AppDoc, label: &str) -> R<Out> {
+    let tool_id = doc.tool_id();
+    let Some(Shadow { entry, mut meta }) = e.live.shadows.remove(&doc.id) else {
+        return Err(format!(
+            "transaction {label:?} on {tool_id} lost its edits (the connection to the app was reset); nothing was applied"
+        ));
+    };
+    if *entry.doc.sprite() == meta.base {
+        e.live.shadows.insert(doc.id.clone(), Shadow { entry, meta });
+        return Out::json(
+            json!({ "doc": tool_id, "open_transactions": [], "note": "the transaction changed nothing" }),
+        );
+    }
+    let top = entry.layer_count().saturating_sub(1);
+    let last_frame = entry.doc.frame_count().saturating_sub(1);
+    let new_layer = (entry.layer != meta.app_layer).then_some(entry.layer.min(top));
+    let new_frame = (entry.frame != meta.app_frame).then_some(entry.frame.min(last_frame));
+    match e.live.apply(&doc.id, meta.revision, entry.doc.sprite(), label, new_layer, new_frame) {
+        Ok(applied) => {
+            meta.base = entry.doc.sprite().clone();
+            meta.revision = applied.revision;
+            meta.app_layer = applied.layer;
+            meta.app_frame = applied.frame;
+            e.live.shadows.insert(doc.id.clone(), Shadow { entry, meta });
+            Out::json(json!({
+                "doc": tool_id, "open_transactions": [],
+                "applied": format!("one undo step \"AI: {label}\" in the app"),
+            }))
+        }
+        Err(RpcError::Rpc { code: STALE, .. }) => Err(format!(
+            "{tool_id} was changed in the Pixmith app while transaction {label:?} was open, so its edits were dropped and nothing was applied; begin the transaction again and redo them"
+        )),
+        Err(x) => Err(explain(&x, &tool_id)),
     }
 }
 
@@ -843,6 +983,16 @@ fn run_on_shadow(e: &mut Engine, call: &Call, args: Value, mut doc: AppDoc) -> R
     let name = call.def.name;
     let tool_id = doc.tool_id();
     let label = label_for(name, &args);
+    let batch = e.live.batching(&doc.id).cloned();
+    if let Some(label) = &batch
+        && e.live.shadows.get(&doc.id).is_none_or(|sh| sh.meta.revision != doc.revision)
+    {
+        e.live.batches.remove(&doc.id);
+        e.live.shadows.remove(&doc.id);
+        return Err(format!(
+            "{tool_id} was changed in the Pixmith app while transaction {label:?} was open, so the transaction was cancelled and its edits dropped (nothing was applied); begin it again and redo them"
+        ));
+    }
     for attempt in 0..=STALE_RETRIES {
         let sh = e.live.checkout(&doc, attempt > 0)?;
         let Shadow { entry, mut meta } = sh;
@@ -857,8 +1007,9 @@ fn run_on_shadow(e: &mut Engine, call: &Call, args: Value, mut doc: AppDoc) -> R
         let mut out = match result {
             Ok(o) => o,
             Err(msg) => {
-                // A failed call changes nothing; keep the copy (and its selection) unless it did change.
-                if !changed {
+                // A failed call changes nothing; keep the copy (and its selection) unless it did change. Inside a
+                // transaction the copy holds the earlier calls' edits, so it is always kept.
+                if !changed || batch.is_some() {
                     e.live.shadows.insert(doc.id.clone(), Shadow { entry, meta });
                 }
                 return Err(msg);
@@ -871,6 +1022,16 @@ fn run_on_shadow(e: &mut Engine, call: &Call, args: Value, mut doc: AppDoc) -> R
         }
         if call.def.hints.read_only {
             e.live.shadows.insert(doc.id.clone(), Shadow { entry, meta });
+            return Ok(out);
+        }
+        if let Some(label) = &batch {
+            e.live.shadows.insert(doc.id.clone(), Shadow { entry, meta });
+            if let Some(o) = out.value.as_object_mut() {
+                o.insert(
+                    "pending".into(),
+                    json!(format!("inside transaction {label:?}: the app shows this when the transaction ends")),
+                );
+            }
             return Ok(out);
         }
         // Where the app's current layer and frame should go: wherever the tool made them go, or where it was aimed.

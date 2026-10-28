@@ -20,7 +20,7 @@ default = ["http"]
 http = ["dep:axum", "rmcp/transport-streamable-http-server"]
 
 [dependencies]
-pixmith-core = { git = "https://github.com/azdharsyahputra/pixmith", rev = "7750c1c2b473f47d120f8e485b32d7522d4b0975", package = "pixmith-core" }
+pixmith-core = { git = "https://github.com/azdharsyahputra/pixmith", rev = "63f1869744a1f32b29feb62112e6ff87b563faac", package = "pixmith-core" }
 rmcp = { version = "3.7.0", default-features = false, features = ["server", "macros", "transport-io"] }
 tokio = { version = "1.54", features = ["rt-multi-thread", "macros", "io-std", "sync", "net", "signal"] }
 serde = { version = "1", features = ["derive"] }

@@ -277,8 +277,11 @@ fn doc_new_creates_the_sprite_in_the_app() {
     // The whole document arrives in the one `documents.new` request: no apply, no undo step.
     assert_eq!(mock.undo_labels("doc-2"), Vec::<String>::new());
     assert_eq!(mock.applies(), 0);
-    // New documents become the active one; tools find it without `doc`.
-    c.ok("draw_pixels", json!({ "points": [[0, 0]], "color": "#00ff00" }));
+    // With two documents open a call must name one, so it cannot land in whatever tab the user is looking at.
+    let e = c.err("draw_pixels", json!({ "points": [[0, 0]], "color": "#00ff00" }));
+    assert!(e.contains("pass `doc`") && e.contains("looking at app:doc-2"), "{e}");
+    assert_eq!(mock.pixel("doc-2", 0, 0), RED);
+    c.ok("draw_pixels", json!({ "doc": "app:doc-2", "points": [[0, 0]], "color": "#00ff00" }));
     assert_eq!(mock.pixel("doc-2", 0, 0), [0, 255, 0, 255]);
     assert_eq!(mock.pixel("doc-1", 0, 0), CLEAR);
     // Invalid arguments are refused before anything is created.
@@ -425,10 +428,45 @@ fn undo_goes_to_the_app_when_it_can_and_says_so_when_it_cannot() {
     let out = c.ok("redo", json!({}));
     assert_eq!(out["redone"], 1);
     assert_eq!(mock.pixel("doc-1", 1, 1), RED);
-    // Transactions are not needed: every call is a step, and begin/end are harmless.
-    let t = c.ok("transaction", json!({ "action": "begin", "label": "x" }));
-    assert!(t["note"].as_str().unwrap().contains("not used in live mode"), "{t}");
-    c.ok("transaction", json!({ "action": "end" }));
+}
+
+#[test]
+fn a_transaction_reaches_the_app_as_one_undo_step() {
+    let (mut c, mock) = start();
+    let steps = mock.undo_labels("doc-1").len();
+    c.ok("transaction", json!({ "action": "begin", "label": "slime" }));
+    c.ok("transaction", json!({ "action": "begin", "label": "eyes" }));
+    let r = c.ok("draw_pixels", json!({ "points": [[2, 2]], "color": "#00ff00" }));
+    assert!(r["pending"].as_str().unwrap().contains("slime"), "{r}");
+    c.ok("draw_shape", json!({ "shape": "line", "from": [0, 3], "to": [3, 3], "color": "#00ff00" }));
+    // Nothing reaches the app before the outermost end, but the tools already see the edits.
+    assert_eq!(mock.pixel("doc-1", 2, 2), CLEAR);
+    assert_eq!(c.pixel(2, 2), "#00ff00ff");
+    for t in ["undo", "doc_save"] {
+        let e = c.err(t, json!({}));
+        assert!(e.contains("transaction \"slime\" is open"), "{t}: {e}");
+    }
+    let r = c.ok("transaction", json!({ "action": "end" }));
+    assert_eq!(r["open_transactions"], json!(["slime"]), "{r}");
+    assert_eq!(mock.pixel("doc-1", 2, 2), CLEAR);
+    let r = c.ok("transaction", json!({ "action": "end" }));
+    assert!(r["applied"].as_str().unwrap().contains("AI: slime"), "{r}");
+    assert_eq!(mock.pixel("doc-1", 2, 2), [0, 255, 0, 255]);
+    assert_eq!(mock.pixel("doc-1", 0, 3), [0, 255, 0, 255]);
+    let labels = mock.undo_labels("doc-1");
+    assert_eq!(labels.len(), steps + 1, "{labels:?}");
+    assert_eq!(labels.last().unwrap(), "AI: slime");
+    assert!(c.err("transaction", json!({ "action": "end" })).contains("no transaction is open"));
+
+    // The user draws on the document while a transaction is open: it is cancelled and nothing is applied.
+    c.ok("transaction", json!({ "action": "begin", "label": "hat" }));
+    c.ok("draw_pixels", json!({ "points": [[1, 1]], "color": "#0000ff" }));
+    mock.with(|s| s.user_fill(0, 0xff0000ff));
+    let e = c.err("draw_pixels", json!({ "points": [[1, 2]], "color": "#0000ff" }));
+    assert!(e.contains("was changed in the Pixmith app") && e.contains("cancelled"), "{e}");
+    assert_eq!(mock.pixel("doc-1", 1, 1), RED);
+    assert!(c.err("transaction", json!({ "action": "end" })).contains("no transaction is open"));
+    assert_eq!(mock.undo_labels("doc-1").len(), steps + 1);
 }
 
 #[test]
